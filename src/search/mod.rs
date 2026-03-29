@@ -677,8 +677,7 @@ fn source_priority(path: &Path) -> u8 {
         "ts" | "tsx" => 10,
         "rs" | "go" | "py" | "rb" | "java" | "kt" | "scala" | "swift" | "c" | "cpp" | "h"
         | "cs" | "php" => 9,
-        "jsx" => 8,
-        "js" | "mjs" | "cjs" => 5,
+        "js" | "jsx" | "mjs" | "cjs" => 7,
         _ => 3,
     }
 }
@@ -686,9 +685,12 @@ fn source_priority(path: &Path) -> u8 {
 /// When a file's basename (without extension) matches the query exactly,
 /// return a compact outline of that file. Helps concept queries like `cli`
 /// surface the file `cli.ts` with structural context instead of scattered text matches.
+///
+/// Uses the already-collected search results to find basename matches,
+/// avoiding an expensive directory walk in the formatting path.
 fn basename_file_outline(
     query: &str,
-    _matches: &[Match],
+    matches: &[Match],
     scope: &Path,
     cache: &OutlineCache,
 ) -> Option<String> {
@@ -699,74 +701,63 @@ fn basename_file_outline(
         return None;
     }
 
-    // Walk scope directory to find files whose basename matches query
-    let mut candidate: Option<std::path::PathBuf> = None;
-    let walker = ignore::WalkBuilder::new(scope)
-        .hidden(true)
-        .git_ignore(true)
-        .max_depth(Some(6))
-        .build();
+    // Find the best candidate among existing matches whose basename matches the query
+    let mut candidate: Option<&Path> = None;
+    let mut best_priority: u8 = 0;
 
-    for entry in walker.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+    for m in matches {
+        let stem = match m.path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s,
             None => continue,
         };
-        if stem.to_ascii_lowercase() == query_lower {
-            // Prefer code files over non-code
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let is_code = matches!(
-                ext,
-                "rs" | "ts"
-                    | "tsx"
-                    | "js"
-                    | "jsx"
-                    | "go"
-                    | "py"
-                    | "rb"
-                    | "java"
-                    | "c"
-                    | "cpp"
-                    | "h"
-                    | "cs"
-                    | "swift"
-                    | "kt"
-                    | "scala"
-                    | "php"
-            );
-            if is_code {
-                match &candidate {
-                    None => candidate = Some(path.to_path_buf()),
-                    Some(prev) => {
-                        // Prefer source extension over compiled equivalent
-                        if source_priority(path) > source_priority(prev) {
-                            candidate = Some(path.to_path_buf());
-                        }
-                    }
-                }
-            }
+        if stem.to_ascii_lowercase() != query_lower {
+            continue;
+        }
+        let ext = m.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_code = matches!(
+            ext,
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "go"
+                | "py"
+                | "rb"
+                | "java"
+                | "c"
+                | "cpp"
+                | "h"
+                | "cs"
+                | "swift"
+                | "kt"
+                | "scala"
+                | "php"
+        );
+        if !is_code {
             if candidate.is_none() {
-                candidate = Some(path.to_path_buf());
+                candidate = Some(&m.path);
             }
+            continue;
+        }
+        let prio = source_priority(&m.path);
+        if prio > best_priority {
+            best_priority = prio;
+            candidate = Some(&m.path);
         }
     }
 
     let matched_path = candidate?;
 
     // Read file and generate outline
-    let content = std::fs::read_to_string(&matched_path).ok()?;
-    let file_type = crate::read::detect_file_type(&matched_path);
-    let mtime = std::fs::metadata(&matched_path)
+    let content = std::fs::read_to_string(matched_path).ok()?;
+    let file_type = crate::read::detect_file_type(matched_path);
+    let mtime = std::fs::metadata(matched_path)
         .and_then(|m| m.modified())
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
-    let outline = cache.get_or_compute(&matched_path, mtime, || {
+    let outline = cache.get_or_compute(matched_path, mtime, || {
         crate::read::outline::generate(
-            &matched_path,
+            matched_path,
             file_type,
             &content,
             content.as_bytes(),
@@ -778,7 +769,7 @@ fn basename_file_outline(
         return None;
     }
 
-    let rel_path = rel(&matched_path, scope);
+    let rel_path = rel(matched_path, scope);
     let line_count = content.lines().count();
     Some(format!(
         "### File overview: {rel_path} ({line_count} lines)\n{outline}"

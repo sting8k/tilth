@@ -21,12 +21,15 @@ const VENDOR_DIRS: &[&str] = &[
 /// Sort matches by score (highest first). Deterministic: same inputs, same order.
 /// When `context` is provided, matches near the context file are boosted.
 pub fn sort(matches: &mut [Match], query: &str, scope: &Path, context: Option<&Path>) {
+    // Pre-compute context's package root once (same for entire batch)
     let ctx_parent = context.and_then(|c| c.parent());
     let ctx_pkg_root = context
         .and_then(package_root)
         .map(std::path::Path::to_path_buf);
 
+    // Cache package roots for match paths — avoids repeated stat walks
     let mut pkg_cache: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    // Capture now once so the sort comparator does not call SystemTime::now() O(n log n) times.
     let now = SystemTime::now();
 
     matches.sort_by(|a, b| {
@@ -54,6 +57,8 @@ pub fn sort(matches: &mut [Match], query: &str, scope: &Path, context: Option<&P
     });
 }
 
+/// Ranking function. Each match gets a score — no floating point, no randomness.
+/// All boosts are positive (added), all penalties are positive (subtracted).
 fn score(
     m: &Match,
     query: &str,
@@ -82,13 +87,14 @@ fn score(
         s += 50;
     }
 
+    // Context-aware boosts
     if ctx_parent.is_some() || ctx_pkg_root.is_some() {
         s += context_proximity(&m.path, ctx_parent, ctx_pkg_root, pkg_cache);
     }
 
     s += basename_boost(&m.path, query);
     s += exported_api_boost(m);
-    s += non_code_penalty(&m.path);
+    s -= non_code_penalty(&m.path);
     s -= incidental_text_penalty(m, query);
 
     if is_test_file(&m.path) && !looks_like_test_query(query) {
@@ -96,6 +102,7 @@ fn score(
     }
     s -= fixture_penalty(m);
 
+    // Vendor penalty (always active)
     if is_vendor_path(&m.path) {
         s -= 200;
     }
@@ -103,6 +110,7 @@ fn score(
     s
 }
 
+/// Boost matches whose file stem matches the query.
 fn basename_boost(path: &Path, query: &str) -> i32 {
     if query.is_empty() {
         return 0;
@@ -144,12 +152,14 @@ fn basename_boost(path: &Path, query: &str) -> i32 {
     0
 }
 
+/// 0-200, closer to scope root = higher.
 fn scope_proximity(path: &Path, scope: &Path) -> u32 {
     let rel = path.strip_prefix(scope).unwrap_or(path);
     let depth = rel.components().count();
     200u32.saturating_sub(depth as u32 * 20)
 }
 
+/// Context-aware proximity boost with cached package roots.
 fn context_proximity(
     match_path: &Path,
     ctx_parent: Option<&Path>,
@@ -158,6 +168,7 @@ fn context_proximity(
 ) -> i32 {
     let mut score = 0;
 
+    // Same directory as context file
     if let Some(cp) = ctx_parent {
         if match_path.parent() == Some(cp) {
             score += 100;
@@ -166,6 +177,7 @@ fn context_proximity(
         }
     }
 
+    // Same package root (cached)
     if let Some(cp_root) = ctx_pkg_root {
         let match_dir = match match_path.parent() {
             Some(d) => d.to_path_buf(),
@@ -266,6 +278,7 @@ fn exported_api_boost(m: &Match) -> i32 {
     }
 }
 
+/// Penalize matches in test fixtures, mocks, stubs, etc. Capped at 200.
 fn fixture_penalty(m: &Match) -> i32 {
     let path = m.path.to_string_lossy().to_ascii_lowercase();
     let text = m.text.to_ascii_lowercase();
@@ -279,9 +292,10 @@ fn fixture_penalty(m: &Match) -> i32 {
             score += 40;
         }
     }
-    score
+    score.min(200)
 }
 
+/// Penalize matches that appear only in comments (not code).
 fn incidental_text_penalty(m: &Match, query: &str) -> i32 {
     if m.is_definition {
         return 0;
@@ -290,28 +304,22 @@ fn incidental_text_penalty(m: &Match, query: &str) -> i32 {
     let text = m.text.trim();
     let q_lower = query.to_ascii_lowercase();
 
+    // Only use unambiguous comment prefixes — avoid '#' (Python/C preprocessor/Rust attrs)
+    // and '*' (could be pointer deref, multiplication, glob, etc.)
     let is_comment = text.starts_with("//")
-        || text.starts_with('#')
         || text.starts_with("/*")
-        || text.starts_with('*')
         || text.starts_with("<!--");
 
     if is_comment {
         return 150;
     }
 
-    let is_string_only = {
-        let t_lower = text.to_ascii_lowercase();
-        let Some(pos) = t_lower.find(&q_lower) else {
-            return 0;
-        };
-        let before = &text[..pos];
-        let quote_count = before.chars().filter(|&c| c == '"' || c == '\'').count();
-        quote_count % 2 == 1
-    };
-
-    if is_string_only {
-        return 120;
+    // Check if query only appears in a trailing comment (after //)
+    let t_lower = text.to_ascii_lowercase();
+    if let Some(comment_start) = t_lower.find("//") {
+        if t_lower[comment_start..].contains(&q_lower) && !t_lower[..comment_start].contains(&q_lower) {
+            return 100;
+        }
     }
 
     0
@@ -345,6 +353,9 @@ fn multi_word_boost(m: &Match, query: &str) -> i32 {
     }
 }
 
+/// Penalize non-code files: docs, config examples, generated output.
+/// Returns positive value (subtracted from score by caller).
+/// Note: dist/, build/ are NOT penalized here — they are already covered by VENDOR_DIRS.
 fn non_code_penalty(path: &Path) -> i32 {
     let ext = path
         .extension()
@@ -359,18 +370,17 @@ fn non_code_penalty(path: &Path) -> i32 {
         || path_str.contains("template"))
         && (ext == "md" || ext == "txt" || ext == "rst");
 
-    let is_generated = path_str.contains("generated") || path_str.contains("dist/")
-        || path_str.contains("build/");
+    let is_generated = path_str.contains("generated");
 
     let mut penalty = 0;
     if is_docs {
-        penalty -= 250;
+        penalty += 250;
     }
     if is_config_example {
-        penalty -= 80;
+        penalty += 80;
     }
     if is_generated {
-        penalty -= 150;
+        penalty += 150;
     }
     penalty
 }
@@ -390,10 +400,12 @@ fn shared_prefix_depth(a: &Path, b: &Path) -> usize {
         .count()
 }
 
+/// Re-export from parent module to keep rank.rs self-contained.
 fn package_root(path: &Path) -> Option<&Path> {
     super::package_root(path)
 }
 
+/// Check if path contains a vendor directory component.
 fn is_vendor_path(path: &Path) -> bool {
     path.components().any(|c| {
         c.as_os_str()
@@ -402,14 +414,15 @@ fn is_vendor_path(path: &Path) -> bool {
     })
 }
 
+/// 0-100, newer = higher. Files modified within the last hour get max score.
 fn recency(mtime: SystemTime, now: SystemTime) -> u32 {
     let age = now.duration_since(mtime).unwrap_or_default().as_secs();
 
     match age {
-        0..=3_600 => 100,
-        3_601..=86_400 => 80,
-        86_401..=604_800 => 50,
-        604_801..=2_592_000 => 20,
+        0..=3_600 => 100,          // last hour
+        3_601..=86_400 => 80,      // last day
+        86_401..=604_800 => 50,    // last week
+        604_801..=2_592_000 => 20, // last month
         _ => 0,
     }
 }
@@ -601,5 +614,122 @@ mod tests {
             "expected model_mapping.go first, got {:?}",
             matches[0].path,
         );
+    }
+
+    // --- Unit tests for individual penalty/boost functions ---
+
+    #[test]
+    fn non_code_penalty_docs_positive() {
+        // Docs get penalized (positive return value, subtracted by caller)
+        let path = PathBuf::from("/repo/docs/guide.md");
+        assert!(super::non_code_penalty(&path) > 0);
+    }
+
+    #[test]
+    fn non_code_penalty_no_double_penalty_for_dist() {
+        // dist/ should NOT be penalized here — VENDOR_DIRS handles it
+        let path = PathBuf::from("/repo/dist/bundle.js");
+        assert_eq!(super::non_code_penalty(&path), 0);
+    }
+
+    #[test]
+    fn non_code_penalty_no_double_penalty_for_build() {
+        let path = PathBuf::from("/repo/build/output.js");
+        assert_eq!(super::non_code_penalty(&path), 0);
+    }
+
+    #[test]
+    fn non_code_penalty_generated_without_dist() {
+        let path = PathBuf::from("/repo/src/generated/types.ts");
+        assert!(super::non_code_penalty(&path) > 0);
+    }
+
+    #[test]
+    fn non_code_penalty_normal_code_zero() {
+        let path = PathBuf::from("/repo/src/auth.rs");
+        assert_eq!(super::non_code_penalty(&path), 0);
+    }
+
+    #[test]
+    fn fixture_penalty_capped_at_200() {
+        // A path hitting multiple needles should be capped
+        let m = make_match(
+            "/repo/src/fixtures/mock_stub_fake.ts",
+            "example fixture mock stub fake",
+            false,
+            None,
+        );
+        let penalty = super::fixture_penalty(&m);
+        assert!(penalty <= 200, "fixture_penalty was {penalty}, expected <= 200");
+        assert!(penalty > 0);
+    }
+
+    #[test]
+    fn fixture_penalty_zero_for_normal_code() {
+        let m = make_match("/repo/src/auth.ts", "export function handleAuth() {", true, Some("handleAuth"));
+        assert_eq!(super::fixture_penalty(&m), 0);
+    }
+
+    #[test]
+    fn incidental_text_penalty_comment_line() {
+        // Lines starting with // should be penalized
+        let m = make_match("/repo/src/lib.rs", "// handleAuth is deprecated", false, None);
+        assert_eq!(super::incidental_text_penalty(&m, "handleAuth"), 150);
+    }
+
+    #[test]
+    fn incidental_text_penalty_no_hash_false_positive() {
+        // # should NOT trigger comment penalty (could be Python, C preprocessor, etc.)
+        let m = make_match("/repo/src/main.py", "#include <stdio.h>", false, None);
+        assert_eq!(super::incidental_text_penalty(&m, "stdio"), 0);
+    }
+
+    #[test]
+    fn incidental_text_penalty_no_star_false_positive() {
+        // * should NOT trigger comment penalty
+        let m = make_match("/repo/src/main.c", "*ptr = value;", false, None);
+        assert_eq!(super::incidental_text_penalty(&m, "ptr"), 0);
+    }
+
+    #[test]
+    fn incidental_text_penalty_no_string_literal_heuristic() {
+        // String literals should NOT be penalized (fragile heuristic removed)
+        let m = make_match("/repo/src/lib.rs", r#"let msg = "handleAuth error";"#, false, None);
+        assert_eq!(super::incidental_text_penalty(&m, "handleAuth"), 0);
+    }
+
+    #[test]
+    fn incidental_text_penalty_trailing_comment() {
+        // Query only in trailing comment should be penalized
+        let m = make_match("/repo/src/lib.rs", "let x = 1; // handleAuth workaround", false, None);
+        assert_eq!(super::incidental_text_penalty(&m, "handleAuth"), 100);
+    }
+
+    #[test]
+    fn incidental_text_penalty_skip_definitions() {
+        // Definitions should never be penalized
+        let m = make_match("/repo/src/lib.rs", "// handleAuth docs", true, Some("handleAuth"));
+        assert_eq!(super::incidental_text_penalty(&m, "handleAuth"), 0);
+    }
+
+    #[test]
+    fn sign_convention_all_penalties_positive() {
+        // All penalty functions should return >= 0 (positive values, subtracted by score())
+        let doc_path = PathBuf::from("/repo/docs/guide.md");
+        assert!(super::non_code_penalty(&doc_path) >= 0);
+
+        let fixture = make_match("/repo/fixtures/mock.ts", "mock data", false, None);
+        assert!(super::fixture_penalty(&fixture) >= 0);
+
+        let comment = make_match("/repo/src/lib.rs", "// TODO fix auth", false, None);
+        assert!(super::incidental_text_penalty(&comment, "auth") >= 0);
+    }
+
+    #[test]
+    fn vendor_path_detects_dist_and_build() {
+        // dist/ and build/ are in VENDOR_DIRS — this is where the penalty comes from
+        assert!(super::is_vendor_path(&PathBuf::from("/repo/dist/bundle.js")));
+        assert!(super::is_vendor_path(&PathBuf::from("/repo/build/output.js")));
+        assert!(!super::is_vendor_path(&PathBuf::from("/repo/src/auth.rs")));
     }
 }

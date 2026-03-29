@@ -7,9 +7,6 @@ pub enum QueryType {
     FilePath(PathBuf),
     Glob(String),
     Symbol(String),
-    /// Broad concept query — single lowercase word or multi-word phrase
-    /// that likely refers to a feature/module/flow rather than an exact symbol.
-    Concept(String),
     Content(String),
     /// Slash-wrapped regex: `/pattern/` → regex content search.
     Regex(String),
