@@ -277,17 +277,13 @@ pub fn search_content_raw(query: &str, scope: &Path) -> Result<SearchResult, Til
     content::search(pattern, scope, is_regex, None)
 }
 
-/// Format a symbol search result (public for Fallthrough path in lib.rs).
-pub fn format_symbol_result(
-    result: &SearchResult,
-    cache: &OutlineCache,
-) -> Result<String, TilthError> {
-    let bloom = crate::index::bloom::BloomFilterCache::new();
-    format_search_result(result, cache, None, &bloom, 0)
+/// Raw regex search — returns structured result for programmatic inspection.
+pub fn search_regex_raw(pattern: &str, scope: &Path) -> Result<SearchResult, TilthError> {
+    content::search(pattern, scope, true, None)
 }
 
-/// Format a content search result (public for Fallthrough path in lib.rs).
-pub fn format_content_result(
+/// Format a raw search result (symbol or content — both use the same pipeline).
+pub fn format_raw_result(
     result: &SearchResult,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
@@ -349,12 +345,34 @@ fn format_matches(
 }
 
 /// Group consecutive non-definition matches by (path, enclosing outline entry).
+/// Dedup key for definition matches: (path, line, `def_range`, `def_name`, `impl_target`).
+type DefKey<'a> = (
+    &'a Path,
+    u32,
+    Option<(u32, u32)>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+
 /// Returns a Vec of groups, where each group is a slice of matches.
 /// Definitions and impl matches are always singleton groups.
 fn group_matches<'a>(matches: &'a [Match], cache: &OutlineCache) -> Vec<Vec<&'a Match>> {
     let mut groups: Vec<Vec<&Match>> = Vec::new();
+    let mut seen_defs: HashSet<DefKey<'_>> = HashSet::new();
 
     for m in matches {
+        if m.is_definition || m.impl_target.is_some() {
+            let key = (
+                m.path.as_path(),
+                m.line,
+                m.def_range,
+                m.def_name.as_deref(),
+                m.impl_target.as_deref(),
+            );
+            if !seen_defs.insert(key) {
+                continue;
+            }
+        }
         // Definitions and impls are never grouped
         if m.is_definition || m.impl_target.is_some() {
             groups.push(vec![m]);
@@ -656,6 +674,150 @@ fn format_single_match(
 /// When an outline cache is available, wraps each match in the file's outline context.
 /// When `expand > 0`, the top N matches inline actual code (def body or ±10 lines).
 /// When there are >5 matches, groups them into facets for easier navigation.
+/// Prefer source languages over their compiled equivalents.
+/// Higher value = more likely to be the original source.
+fn source_priority(path: &Path) -> u8 {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "ts" | "tsx" => 10,
+        "rs" | "go" | "py" | "rb" | "java" | "kt" | "scala" | "swift" | "c" | "cpp" | "h"
+        | "cs" | "php" => 9,
+        "js" | "jsx" | "mjs" | "cjs" => 7,
+        _ => 3,
+    }
+}
+
+/// Find a basename-matching candidate among already-collected search matches.
+fn find_basename_candidate(matches: &[Match], query_lower: &str) -> Option<PathBuf> {
+    let mut candidate: Option<&Path> = None;
+    let mut best_priority: u8 = 0;
+
+    for m in matches {
+        let Some(stem) = m.path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.to_ascii_lowercase() != query_lower {
+            continue;
+        }
+        let ext = m.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_code = matches!(
+            ext,
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "go"
+                | "py"
+                | "rb"
+                | "java"
+                | "c"
+                | "cpp"
+                | "h"
+                | "cs"
+                | "swift"
+                | "kt"
+                | "scala"
+                | "php"
+        );
+        if !is_code {
+            if candidate.is_none() {
+                candidate = Some(&m.path);
+            }
+            continue;
+        }
+        let prio = source_priority(&m.path);
+        if prio > best_priority {
+            best_priority = prio;
+            candidate = Some(&m.path);
+        }
+    }
+
+    candidate.map(Path::to_path_buf)
+}
+
+/// Fallback: lightweight directory walk to find a basename-matching file
+/// when it didn't survive ranking/truncation in the match set.
+fn find_basename_fallback(scope: &Path, query_lower: &str) -> Option<PathBuf> {
+    let mut candidate: Option<PathBuf> = None;
+    let mut best_priority: u8 = 0;
+
+    let walker = ignore::WalkBuilder::new(scope)
+        .hidden(true)
+        .git_ignore(true)
+        .max_depth(Some(6))
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.to_ascii_lowercase() != *query_lower {
+            continue;
+        }
+        let prio = source_priority(path);
+        if prio > best_priority {
+            best_priority = prio;
+            candidate = Some(path.to_path_buf());
+        }
+    }
+
+    candidate
+}
+
+/// When a file's basename (without extension) matches the query exactly,
+/// return a compact outline of that file. Helps concept queries like `cli`
+/// surface the file `cli.ts` with structural context instead of scattered text matches.
+///
+/// Scans the already-collected search results first (fast path), falls back to
+/// a lightweight directory walk when the basename file didn't survive truncation.
+fn basename_file_outline(
+    query: &str,
+    matches: &[Match],
+    scope: &Path,
+    cache: &OutlineCache,
+) -> Option<String> {
+    let query_lower = query.to_ascii_lowercase();
+
+    // Only trigger for short single-word queries (concept/file-level intent)
+    if query_lower.is_empty() || query.contains(' ') || query.contains("::") {
+        return None;
+    }
+
+    // Find the best candidate among existing matches whose basename matches the query
+    let matched_path = find_basename_candidate(matches, &query_lower)
+        .or_else(|| find_basename_fallback(scope, &query_lower))?;
+
+    // Read file and generate outline
+    let content = std::fs::read_to_string(&matched_path).ok()?;
+    let file_type = crate::read::detect_file_type(&matched_path);
+    let mtime = std::fs::metadata(&matched_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+    let outline = cache.get_or_compute(&matched_path, mtime, || {
+        crate::read::outline::generate(
+            &matched_path,
+            file_type,
+            &content,
+            content.as_bytes(),
+            false,
+        )
+    });
+
+    if outline.trim().is_empty() {
+        return None;
+    }
+
+    let rel_path = rel(&matched_path, scope);
+    let line_count = content.lines().count();
+    Some(format!(
+        "### File overview: {rel_path} ({line_count} lines)\n{outline}"
+    ))
+}
+
 fn format_search_result(
     result: &SearchResult,
     cache: &OutlineCache,
@@ -673,6 +835,14 @@ fn format_search_result(
     let mut out = header;
     let mut expand_remaining = expand;
     let mut expanded_files = HashSet::new();
+
+    // File-level retrieval: when a file basename matches the query exactly,
+    // prepend a compact outline so the agent gets file-level context first.
+    if let Some(file_outline) =
+        basename_file_outline(&result.query, &result.matches, &result.scope, cache)
+    {
+        let _ = write!(out, "\n\n{file_outline}");
+    }
 
     // Apply faceting when there are many matches (>5)
     if result.matches.len() > 5 {
