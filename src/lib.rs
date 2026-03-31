@@ -113,10 +113,6 @@ fn run_inner(
     expand: usize,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
-    // Create throwaway deps for expanded/multi search (single-shot CLI, no reuse)
-    let session = session::Session::new();
-    let sym_index = index::SymbolIndex::new();
-    let bloom = index::bloom::BloomFilterCache::new();
     let use_expanded = expand > 0;
 
     let query_type = classify(query, scope);
@@ -134,6 +130,9 @@ fn run_inner(
             });
         }
         if parts.len() >= 2 && parts.len() <= 5 && all_identifiers {
+            let session = session::Session::new();
+            let sym_index = index::SymbolIndex::new();
+            let bloom = index::bloom::BloomFilterCache::new();
             let expand = if expand > 0 { expand } else { 2 };
             let output = search::search_multi_symbol_expanded(
                 &parts, scope, cache, &session, &sym_index, &bloom, expand, None,
@@ -143,6 +142,20 @@ fn run_inner(
                 None => Ok(output),
             };
         }
+    }
+
+    // Allocate expanded search deps only when needed (single-shot CLI, no reuse)
+    let session;
+    let sym_index;
+    let bloom;
+    if use_expanded {
+        session = Some(session::Session::new());
+        sym_index = Some(index::SymbolIndex::new());
+        bloom = Some(index::bloom::BloomFilterCache::new());
+    } else {
+        session = None;
+        sym_index = None;
+        bloom = None;
     }
 
     let output = match query_type {
@@ -169,7 +182,7 @@ fn run_inner(
         QueryType::Symbol(name) => {
             if use_expanded {
                 search::search_symbol_expanded(
-                    &name, scope, cache, &session, &sym_index, &bloom, expand, None,
+                    &name, scope, cache, session.as_ref().unwrap(), sym_index.as_ref().unwrap(), bloom.as_ref().unwrap(), expand, None,
                 )?
             } else {
                 search::search_symbol(&name, scope, cache)?
@@ -183,7 +196,7 @@ fn run_inner(
                 multi_word_concept_search(&text, scope, cache)?
             } else if use_expanded {
                 search::search_symbol_expanded(
-                    &text, scope, cache, &session, &sym_index, &bloom, expand, None,
+                    &text, scope, cache, session.as_ref().unwrap(), sym_index.as_ref().unwrap(), bloom.as_ref().unwrap(), expand, None,
                 )?
             } else {
                 // Single-word concept: prefer definitions, then content, then any match.
@@ -195,7 +208,7 @@ fn run_inner(
         QueryType::Content(text) => {
             if use_expanded {
                 search::search_content_expanded(
-                    &text, scope, cache, &session, expand, None,
+                    &text, scope, cache, session.as_ref().unwrap(), expand, None,
                 )?
             } else {
                 search::search_content(&text, scope, cache)?
@@ -204,8 +217,8 @@ fn run_inner(
 
         QueryType::Regex(pattern) => {
             if use_expanded {
-                search::search_content_expanded(
-                    &format!("/{pattern}/"), scope, cache, &session, expand, None,
+                search::search_regex_expanded(
+                    &pattern, scope, cache, session.as_ref().unwrap(), expand, None,
                 )?
             } else {
                 search::search_regex(&pattern, scope, cache)?
@@ -215,7 +228,7 @@ fn run_inner(
         QueryType::Fallthrough(text) => {
             if use_expanded {
                 search::search_symbol_expanded(
-                    &text, scope, cache, &session, &sym_index, &bloom, expand, None,
+                    &text, scope, cache, session.as_ref().unwrap(), sym_index.as_ref().unwrap(), bloom.as_ref().unwrap(), expand, None,
                 )?
             } else {
                 single_query_search(&text, scope, cache, false)?
