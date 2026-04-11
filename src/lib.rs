@@ -113,6 +113,59 @@ pub fn run_deps(
     Ok(search::deps::format_deps(&result, scope, budget_usize))
 }
 
+/// List file paths containing matches for the query (like `rg -l`).
+pub fn run_files(
+    query: &str,
+    scope: &Path,
+    cache: &OutlineCache,
+) -> Result<String, TilthError> {
+    let query_type = classify(query, scope);
+    let result = match query_type {
+        QueryType::FilePath(ref path) => {
+            let rel = path
+                .strip_prefix(scope)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            return Ok(rel);
+        }
+        QueryType::Glob(ref pattern) => {
+            return search::search_glob(pattern, scope, cache);
+        }
+        QueryType::Symbol(ref name) => search::search_symbol_raw(name, scope)?,
+        QueryType::Concept(ref text) | QueryType::Fallthrough(ref text) => {
+            let sym = search::search_symbol_raw(text, scope)?;
+            if sym.total_found > 0 {
+                sym
+            } else {
+                search::search_content_raw(text, scope)?
+            }
+        }
+        QueryType::Content(ref text) => search::search_content_raw(text, scope)?,
+        QueryType::Regex(ref pattern) => search::search_regex_raw(pattern, scope)?,
+    };
+    if result.total_found == 0 {
+        return Err(TilthError::NotFound {
+            path: scope.join(query),
+            suggestion: read::suggest_similar_file(scope, query),
+        });
+    }
+    let mut paths: Vec<String> = result
+        .matches
+        .iter()
+        .map(|m| {
+            m.path
+                .strip_prefix(scope)
+                .unwrap_or(&m.path)
+                .display()
+                .to_string()
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths.join("\n"))
+}
+
 fn run_inner(
     query: &str,
     scope: &Path,

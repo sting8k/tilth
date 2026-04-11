@@ -57,8 +57,12 @@ struct Cli {
     deps: bool,
 
     /// Generate a structural codebase map.
-    #[arg(long, conflicts_with_all = ["callers", "deps", "expand", "section", "full"])]
+    #[arg(long, conflicts_with_all = ["callers", "deps", "expand", "section", "full", "files"])]
     map: bool,
+
+    /// List only file paths containing matches (like rg -l).
+    #[arg(long, conflicts_with_all = ["map", "full", "expand", "section", "edit"])]
+    files: bool,
 
     /// Print shell completions for the given shell.
     #[arg(long, value_name = "SHELL")]
@@ -140,6 +144,13 @@ fn main() {
     // Callers mode
     if cli.callers {
         let result = tilth::run_callers(&query, &scope, expand, cli.budget, &cache);
+        emit_result(result, &query, cli.json, is_tty);
+        return;
+    }
+
+    // Files mode — list matching file paths only
+    if cli.files {
+        let result = tilth::run_files(&query, &scope, &cache);
         emit_result(result, &query, cli.json, is_tty);
         return;
     }

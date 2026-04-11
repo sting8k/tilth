@@ -58,6 +58,11 @@ pub fn classify(query: &str, scope: &Path) -> QueryType {
         if resolved.try_exists().unwrap_or(false) {
             return QueryType::FilePath(resolved);
         }
+        // Not found at scope root — glob fallback, but only if this isn't a dotted symbol
+        // like "Auth.validate" which should fall through to identifier/symbol check
+        if !is_dotted_symbol(query) {
+            return QueryType::Glob(format!("**/{query}"));
+        }
     }
 
     // 6. Identifier — no whitespace, starts with letter/underscore/$/@
@@ -69,7 +74,16 @@ pub fn classify(query: &str, scope: &Path) -> QueryType {
         return QueryType::Concept(query.into());
     }
 
-    // 7. Multi-word — could be concept phrase ("cli mode", "search flow")
+    // 7. OR-pattern — "Foo|Bar|Baz" with no spaces, all parts valid identifiers.
+    //    Common developer intent: multi-symbol grep (rg "A|B|C" equivalent).
+    if !query.contains(' ') && query.contains('|') {
+        let parts: Vec<&str> = query.split('|').filter(|s| !s.is_empty()).collect();
+        if parts.len() >= 2 && parts.iter().all(|p| is_identifier(p)) {
+            return QueryType::Regex(query.into());
+        }
+    }
+
+    // 8. Multi-word — could be concept phrase ("cli mode", "search flow")
     if query.contains(' ') && query.split_whitespace().count() <= 4 {
         let words: Vec<&str> = query.split_whitespace().collect();
         let all_simple = words.iter().all(|w| {
@@ -82,7 +96,7 @@ pub fn classify(query: &str, scope: &Path) -> QueryType {
         }
     }
 
-    // 8. Everything else
+    // 9. Everything else
     QueryType::Content(query.into())
 }
 
@@ -188,6 +202,31 @@ fn has_regex_metachar(s: &str) -> bool {
                 | b'$'
         )
     })
+}
+
+/// Is this a dotted symbol (method/property access) rather than a filename?
+/// "Auth.validate", "std.path" → true (symbol)
+/// "server.go", "config.yaml" → false (filename)
+///
+/// Heuristic: if both sides of the dot are identifiers AND the part after the dot
+/// is longer than 4 chars, it's likely a method call, not a file extension.
+/// Extensions are almost always 1-4 chars (rs, go, java, yaml, toml).
+fn is_dotted_symbol(query: &str) -> bool {
+    let Some(dot_pos) = query.rfind('.') else {
+        return false;
+    };
+    if dot_pos == 0 || dot_pos >= query.len() - 1 {
+        return false;
+    }
+    let before = &query[..dot_pos];
+    let after = &query[dot_pos + 1..];
+    // Both parts must be identifiers
+    if !is_identifier(before) || !is_identifier(after) {
+        return false;
+    }
+    // Short after-dot part (1-4 chars) → likely file extension, not symbol
+    // Long after-dot part (5+ chars) → likely method/property name
+    after.len() > 4
 }
 
 /// Identifier check without regex: first byte is [a-zA-Z_$@],
@@ -365,5 +404,58 @@ mod tests {
         assert!(!is_identifier(""));
         assert!(!is_identifier("has space"));
         assert!(!is_identifier("123start"));
+    }
+
+    #[test]
+    fn or_pattern_queries() {
+        let scope = PathBuf::from(".");
+        // Pipe-separated identifiers → regex
+        assert!(matches!(
+            classify("Config|Security|Auth", &scope),
+            QueryType::Regex(_)
+        ));
+        assert!(matches!(
+            classify("handleAuth|handleLogin", &scope),
+            QueryType::Regex(_)
+        ));
+        assert!(matches!(
+            classify("TODO|FIXME|HACK", &scope),
+            QueryType::Regex(_)
+        ));
+        // Single part with trailing pipe → not regex (only 1 non-empty part)
+        assert!(!matches!(classify("Foo|", &scope), QueryType::Regex(_)));
+        // Non-identifier parts → not regex
+        assert!(!matches!(
+            classify("has space|also space", &scope),
+            QueryType::Regex(_)
+        ));
+        // Already /wrapped/ → regex via step 0, not this check
+        assert!(matches!(
+            classify("/Foo|Bar/", &scope),
+            QueryType::Regex(_)
+        ));
+    }
+
+    #[test]
+    fn bare_filename_glob_fallback() {
+        // File that doesn't exist at scope root → glob fallback
+        let scope = PathBuf::from(".");
+        match classify("ProgramDB.java", &scope) {
+            QueryType::FilePath(_) => {
+                // Also acceptable if file happens to exist
+            }
+            QueryType::Glob(pattern) => {
+                assert_eq!(pattern, "**/ProgramDB.java");
+            }
+            other => panic!("expected FilePath or Glob, got {other:?}"),
+        }
+        // Known extensionless filename that doesn't exist → glob
+        match classify("Dockerfile", &scope) {
+            QueryType::FilePath(_) => {} // exists in tilth repo
+            QueryType::Glob(pattern) => {
+                assert_eq!(pattern, "**/Dockerfile");
+            }
+            other => panic!("expected FilePath or Glob, got {other:?}"),
+        }
     }
 }
