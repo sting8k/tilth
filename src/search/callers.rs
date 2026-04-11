@@ -16,7 +16,6 @@ use crate::read::outline::code::outline_language;
 use crate::session::Session;
 use crate::types::FileType;
 
-const WALKER_SAFETY_LIMIT: usize = 5000;
 /// Default display limit when caller does not specify one.
 /// Max unique caller functions to trace for 2nd hop. Above this = wide fan-out, skip.
 const IMPACT_FANOUT_THRESHOLD: usize = 10;
@@ -56,11 +55,6 @@ pub fn find_callers(
         let found_count = &found_count;
 
         Box::new(move |entry| {
-            // Early termination: enough callers found
-            if found_count.load(Ordering::Relaxed) >= WALKER_SAFETY_LIMIT {
-                return ignore::WalkState::Quit;
-            }
-
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
             };

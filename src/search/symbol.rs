@@ -19,8 +19,6 @@ use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 
-const WALKER_SAFETY_LIMIT_DEFS: usize = 5000;
-const WALKER_SAFETY_LIMIT_USAGES: usize = 5000;
 
 /// Default display limit when caller does not specify one.
 
@@ -111,11 +109,6 @@ fn find_definitions(query: &str, scope: &Path) -> Result<Vec<Match>, TilthError>
         let found_count = &found_count;
 
         Box::new(move |entry| {
-            // Early termination: enough definitions found
-            if found_count.load(Ordering::Relaxed) >= WALKER_SAFETY_LIMIT_DEFS {
-                return ignore::WalkState::Quit;
-            }
-
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
             };
@@ -383,11 +376,6 @@ fn find_usages(
         let found_count = &found_count;
 
         Box::new(move |entry| {
-            // Early termination: enough usages found
-            if found_count.load(Ordering::Relaxed) >= WALKER_SAFETY_LIMIT_USAGES {
-                return ignore::WalkState::Quit;
-            }
-
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
             };

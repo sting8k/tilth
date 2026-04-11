@@ -11,7 +11,6 @@ use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 
-const WALKER_SAFETY_LIMIT: usize = 5000;
 const MAX_SEARCH_FILE_SIZE: u64 = 500_000;
 
 /// Default display limit when caller does not specify one.
@@ -48,10 +47,6 @@ pub fn search(
         let total_found = &total_found;
 
         Box::new(move |entry| {
-            if total_found.load(Ordering::Relaxed) >= WALKER_SAFETY_LIMIT {
-                return ignore::WalkState::Quit;
-            }
-
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
             };
@@ -103,11 +98,7 @@ pub fn search(
                 all.extend(file_matches);
             }
 
-            if total_found.load(Ordering::Relaxed) >= WALKER_SAFETY_LIMIT {
-                ignore::WalkState::Quit
-            } else {
-                ignore::WalkState::Continue
-            }
+            ignore::WalkState::Continue
         })
     });
 
