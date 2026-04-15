@@ -197,7 +197,40 @@ pub fn extract_callee_names(
     let mut names = names;
     names.sort();
     names.dedup();
+
+    // Elixir: the callee query `(call target: (identifier) @callee)` also captures
+    // definition keywords (def, defmodule, etc.) and import keywords (use, import,
+    // alias, require) since those are all `call` nodes. Filter them out.
+    if lang == Lang::Elixir {
+        names.retain(|n| !is_elixir_keyword(n));
+    }
+
     names
+}
+
+/// Keywords that should not appear as callee names in Elixir.
+/// These are definition and import forms that are syntactically `call` nodes.
+fn is_elixir_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "def"
+            | "defp"
+            | "defmodule"
+            | "defmacro"
+            | "defmacrop"
+            | "defguard"
+            | "defguardp"
+            | "defdelegate"
+            | "defstruct"
+            | "defexception"
+            | "defprotocol"
+            | "defimpl"
+            | "defoverridable"
+            | "use"
+            | "import"
+            | "alias"
+            | "require"
+    )
 }
 
 /// Match callee names against outline entries, moving resolved names out of `remaining`.
@@ -616,6 +649,16 @@ end
         assert!(
             names.contains(&"local_func".to_string()),
             "expected local_func, got: {names:?}"
+        );
+
+        // Definition keywords must NOT appear as callees
+        assert!(
+            !names.contains(&"def".to_string()),
+            "definition keyword 'def' should be filtered, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"defmodule".to_string()),
+            "definition keyword 'defmodule' should be filtered, got: {names:?}"
         );
     }
 
