@@ -615,20 +615,59 @@ fn elixir_extract_doc(node: tree_sitter::Node, lines: &[&str]) -> Option<String>
     if attr != "doc" && attr != "moduledoc" {
         return None;
     }
-    // Get the string argument
+    // Get the doc argument — use tree-sitter node types to handle all forms:
+    //   `@doc "text"`           → string node
+    //   `@doc """heredoc"""`    → string node (multi-line)
+    //   `@doc ~S"""sigil"""`    → sigil node
+    //   `@doc ~s"""sigil"""`    → sigil node
+    //   `@doc false`            → boolean node (suppress docs)
     let args = super::treesitter::elixir_arguments(operand)?;
     let mut cursor = args.walk();
     for child in args.children(&mut cursor) {
-        if child.is_named() {
-            let text = node_text(child, lines);
-            let trimmed = text
-                .trim_matches('"')
-                .trim_start_matches("~S\"\"\"")
-                .trim_end_matches("\"\"\"")
-                .trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+        if !child.is_named() {
+            continue;
+        }
+        match child.kind() {
+            // `@doc false` suppresses documentation
+            "boolean" => return None,
+            // Regular string (`"text"`, `"""heredoc"""`) or sigil (`~S"""..."""`, `~s"""..."""`)
+            "string" | "sigil" => {
+                return elixir_extract_doc_string(child, lines);
             }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract the first meaningful line from an Elixir doc string or sigil node.
+///
+/// For single-line strings (`"text"`), returns the content without quotes.
+/// For heredocs/sigils (`"""..."""`, `~S"""..."""`), returns the first
+/// non-empty content line. Uses tree-sitter source lines rather than
+/// fragile string trimming.
+fn elixir_extract_doc_string(node: tree_sitter::Node, lines: &[&str]) -> Option<String> {
+    let start_row = node.start_position().row;
+    let end_row = node.end_position().row;
+
+    if start_row == end_row {
+        // Single-line: `"text"` — strip delimiters
+        let text = node_text(node, lines);
+        let trimmed = text.trim_matches('"').trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(trimmed.to_string());
+    }
+
+    // Multi-line (heredoc or sigil): scan interior lines for first non-empty content
+    for row in (start_row + 1)..end_row {
+        if row >= lines.len() {
+            break;
+        }
+        let line = lines[row].trim();
+        if !line.is_empty() && line != "\"\"\"" {
+            return Some(line.to_string());
         }
     }
     None
