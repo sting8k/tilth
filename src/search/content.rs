@@ -22,6 +22,7 @@ pub fn search(
     context: Option<&Path>,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
 ) -> Result<SearchResult, TilthError> {
     let matcher = if is_regex {
         RegexMatcher::new(pattern)
@@ -38,7 +39,7 @@ pub fn search(
     // Early-quit checks are approximate by design — one extra iteration is harmless.
     let total_found = AtomicUsize::new(0);
 
-    let walker = super::walker(scope);
+    let walker = super::walker(scope, glob)?;
 
     walker.run(|| {
         let matcher = &matcher;

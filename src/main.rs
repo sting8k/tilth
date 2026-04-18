@@ -44,9 +44,17 @@ struct Cli {
     #[arg(long)]
     edit: bool,
 
+    /// Disable project fingerprint in MCP init.
+    #[arg(long)]
+    no_overview: bool,
+
     /// Expand top N search matches with inline source (default: 2 when flag present).
     #[arg(long, num_args = 0..=1, default_missing_value = "2", require_equals = true)]
     expand: Option<usize>,
+
+    /// File pattern filter (e.g. "*.rs", "!*.test.ts", "*.{go,rs}").
+    #[arg(long)]
+    glob: Option<String>,
 
     /// Find all callers of a symbol.
     #[arg(long, conflicts_with_all = ["deps", "map", "edit"])]
@@ -89,6 +97,50 @@ enum Command {
         #[arg(long)]
         edit: bool,
     },
+    /// Show structural diff with function-level change summaries.
+    Diff {
+        /// Diff source: uncommitted (default), staged, or a git ref (e.g. HEAD~1, main..feat).
+        #[arg(default_value = "uncommitted")]
+        source: String,
+
+        /// Restrict diff to a specific file or directory.
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// First file for file-to-file diff (requires --b).
+        #[arg(long)]
+        a: Option<PathBuf>,
+
+        /// Second file for file-to-file diff (requires --a).
+        #[arg(long)]
+        b: Option<PathBuf>,
+
+        /// Path to a .patch file to parse.
+        #[arg(long)]
+        patch: Option<PathBuf>,
+
+        /// Git log range for per-commit summaries (e.g. HEAD~5..HEAD).
+        #[arg(long)]
+        log: Option<String>,
+
+        /// Filter output to symbols or files matching this substring.
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Show blast-radius warnings for signature-changed symbols.
+        #[arg(long)]
+        blast: bool,
+
+        /// Expand top N changed symbols with full source context.
+        #[arg(long, default_value_t = 0)]
+        expand: usize,
+
+        /// Max tokens in response.
+        #[arg(long, default_value_t = 10000)]
+        budget: u64,
+    },
+    /// Show the project fingerprint (what MCP init would inject).
+    Overview,
 }
 
 fn main() {
@@ -110,13 +162,79 @@ fn main() {
                     process::exit(1);
                 }
             }
+            Command::Overview => {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let output = tilth::overview::fingerprint(&cwd);
+                if output.is_empty() {
+                    eprintln!("No project fingerprint could be generated.");
+                    process::exit(1);
+                }
+                println!("{output}");
+            }
+            Command::Diff {
+                source,
+                scope,
+                a,
+                b,
+                patch,
+                log,
+                search,
+                blast,
+                expand,
+                budget,
+            } => {
+                let a_str = a.as_ref().map(|p| p.to_string_lossy().into_owned());
+                let b_str = b.as_ref().map(|p| p.to_string_lossy().into_owned());
+                let patch_str = patch.as_ref().map(|p| p.to_string_lossy().into_owned());
+                let diff_source = match tilth::diff::resolve_source(
+                    Some(&source),
+                    a_str.as_deref(),
+                    b_str.as_deref(),
+                    patch_str.as_deref(),
+                    log.as_deref(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("diff error: {e}");
+                        process::exit(1);
+                    }
+                };
+                let budget_opt = if budget == 0 { None } else { Some(budget) };
+                match tilth::diff::diff(
+                    &diff_source,
+                    scope.as_deref(),
+                    search.as_deref(),
+                    blast,
+                    expand,
+                    budget_opt,
+                ) {
+                    Ok(output) => emit_output(&output, io::stdout().is_terminal()),
+                    Err(e) => {
+                        eprintln!("diff error: {e}");
+                        process::exit(1);
+                    }
+                }
+            }
         }
         return;
     }
 
     // MCP mode: JSON-RPC server
     if cli.mcp {
-        if let Err(e) = tilth::mcp::run(cli.edit) {
+        if cli.no_overview {
+            std::env::set_var("TILTH_NO_OVERVIEW", "1");
+        }
+        // Pass --scope to MCP if it's not the default "."
+        let mcp_scope = if cli.scope.as_os_str() == "." {
+            None
+        } else {
+            Some(
+                cli.scope
+                    .canonicalize()
+                    .unwrap_or_else(|_| cli.scope.clone()),
+            )
+        };
+        if let Err(e) = tilth::mcp::run(cli.edit, mcp_scope.as_deref()) {
             eprintln!("mcp error: {e}");
             process::exit(1);
         }
@@ -151,7 +269,15 @@ fn main() {
 
     // Callers mode
     if cli.callers {
-        let result = tilth::run_callers(&query, &scope, expand, cli.budget, cli.limit, &cache);
+        let result = tilth::run_callers(
+            &query,
+            &scope,
+            expand,
+            cli.budget,
+            cli.limit,
+            cli.glob.as_deref(),
+            &cache,
+        );
         emit_result(result, &query, cli.json, is_tty);
         return;
     }
@@ -195,12 +321,31 @@ fn main() {
             expand,
             cli.limit,
             cli.offset,
+            cli.glob.as_deref(),
             &cache,
         )
     } else if full {
-        tilth::run_full(&query, &scope, cli.section.as_deref(), cli.budget, cli.limit, cli.offset, &cache)
+        tilth::run_full(
+            &query,
+            &scope,
+            cli.section.as_deref(),
+            cli.budget,
+            cli.limit,
+            cli.offset,
+            cli.glob.as_deref(),
+            &cache,
+        )
     } else {
-        tilth::run(&query, &scope, cli.section.as_deref(), cli.budget, cli.limit, cli.offset, &cache)
+        tilth::run(
+            &query,
+            &scope,
+            cli.section.as_deref(),
+            cli.budget,
+            cli.limit,
+            cli.offset,
+            cli.glob.as_deref(),
+            &cache,
+        )
     };
 
     emit_result(result, &query, cli.json, is_tty);
@@ -255,7 +400,8 @@ fn emit_output(output: &str, is_tty: bool) {
         }
     }
 
-    println!("{output}");
+    print!("{output}");
+    let _ = io::stdout().flush();
 }
 
 fn terminal_height() -> usize {

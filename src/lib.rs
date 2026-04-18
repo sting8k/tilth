@@ -16,31 +16,20 @@
 pub(crate) mod budget;
 pub mod cache;
 pub(crate) mod classify;
+pub mod diff;
 pub(crate) mod edit;
 pub mod error;
 pub(crate) mod format;
 pub mod index;
 pub mod install;
+pub(crate) mod lang;
 pub mod map;
 pub mod mcp;
+pub mod overview;
 pub(crate) mod read;
 pub(crate) mod search;
 pub(crate) mod session;
 pub(crate) mod types;
-
-/// Apply pagination (limit + offset) to a `SearchResult` in-place.
-fn paginate(result: &mut types::SearchResult, limit: Option<usize>, offset: usize) {
-    if offset > 0 && offset < result.matches.len() {
-        result.matches = result.matches.split_off(offset);
-    } else if offset >= result.matches.len() && !result.matches.is_empty() {
-        result.matches.clear();
-    }
-    if let Some(n) = limit {
-        result.matches.truncate(n);
-    }
-    result.has_more = result.total_found > offset + result.matches.len();
-    result.offset = offset;
-}
 
 use std::path::Path;
 
@@ -67,12 +56,13 @@ pub fn run(
     budget_tokens: Option<u64>,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
-    run_inner(query, scope, section, budget_tokens, false, 0, limit, offset, cache)
+    run_inner(query, scope, section, budget_tokens, false, 0, limit, offset, glob, cache)
 }
 
-/// Full variant -- forces full file output, bypassing smart views.
+/// Full variant — forces full file output, bypassing smart views.
 pub fn run_full(
     query: &str,
     scope: &Path,
@@ -80,12 +70,13 @@ pub fn run_full(
     budget_tokens: Option<u64>,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
-    run_inner(query, scope, section, budget_tokens, true, 0, limit, offset, cache)
+    run_inner(query, scope, section, budget_tokens, true, 0, limit, offset, glob, cache)
 }
 
-/// Run with expanded search -- inline source for top N matches.
+/// Run with expanded search — inline source for top N matches.
 pub fn run_expanded(
     query: &str,
     scope: &Path,
@@ -95,9 +86,21 @@ pub fn run_expanded(
     expand: usize,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
-    run_inner(query, scope, section, budget_tokens, full, expand, limit, offset, cache)
+    run_inner(
+        query,
+        scope,
+        section,
+        budget_tokens,
+        full,
+        expand,
+        limit,
+        offset,
+        glob,
+        cache,
+    )
 }
 
 /// Find all callers of a symbol.
@@ -107,13 +110,14 @@ pub fn run_callers(
     expand: usize,
     budget_tokens: Option<u64>,
     limit: Option<usize>,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
     let session = session::Session::new();
     let bloom = index::bloom::BloomFilterCache::new();
     let expand = if expand > 0 { expand } else { 2 };
     let output = search::callers::search_callers_expanded(
-        target, scope, cache, &session, &bloom, expand, None, limit,
+        target, scope, cache, &session, &bloom, expand, None, limit, glob,
     )?;
     match budget_tokens {
         Some(b) => Ok(budget::apply(&output, b)),
@@ -134,59 +138,6 @@ pub fn run_deps(
     Ok(search::deps::format_deps(&result, scope, budget_usize))
 }
 
-/// List file paths containing matches for the query (like `rg -l`).
-pub fn run_files(
-    query: &str,
-    scope: &Path,
-    cache: &OutlineCache,
-) -> Result<String, TilthError> {
-    let query_type = classify(query, scope);
-    let result = match query_type {
-        QueryType::FilePath(ref path) => {
-            let rel = path
-                .strip_prefix(scope)
-                .unwrap_or(path)
-                .display()
-                .to_string();
-            return Ok(rel);
-        }
-        QueryType::Glob(ref pattern) => {
-            return search::search_glob(pattern, scope, cache);
-        }
-        QueryType::Symbol(ref name) => search::search_symbol_raw(name, scope)?,
-        QueryType::Concept(ref text) | QueryType::Fallthrough(ref text) => {
-            let sym = search::search_symbol_raw(text, scope)?;
-            if sym.total_found > 0 {
-                sym
-            } else {
-                search::search_content_raw(text, scope)?
-            }
-        }
-        QueryType::Content(ref text) => search::search_content_raw(text, scope)?,
-        QueryType::Regex(ref pattern) => search::search_regex_raw(pattern, scope)?,
-    };
-    if result.total_found == 0 {
-        return Err(TilthError::NotFound {
-            path: scope.join(query),
-            suggestion: read::suggest_similar_file(scope, query),
-        });
-    }
-    let mut paths: Vec<String> = result
-        .matches
-        .iter()
-        .map(|m| {
-            m.path
-                .strip_prefix(scope)
-                .unwrap_or(&m.path)
-                .display()
-                .to_string()
-        })
-        .collect();
-    paths.sort();
-    paths.dedup();
-    Ok(paths.join("\n"))
-}
-
 fn run_inner(
     query: &str,
     scope: &Path,
@@ -196,6 +147,7 @@ fn run_inner(
     expand: usize,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
     let query_type = classify(query, scope);
@@ -230,7 +182,7 @@ fn run_inner(
             let bloom = index::bloom::BloomFilterCache::new();
             let expand = if expand > 0 { expand } else { 2 };
             let output = search::search_multi_symbol_expanded(
-                &parts, scope, cache, &session, &sym_index, &bloom, expand, None, limit, offset,
+                &parts, scope, cache, &session, &sym_index, &bloom, expand, None, limit, offset, glob,
             )?;
             return match budget_tokens {
                 Some(b) => Ok(budget::apply(&output, b)),
@@ -265,9 +217,9 @@ fn run_inner(
                 bloom: index::bloom::BloomFilterCache::new(),
                 expand,
             };
-            run_query_expanded(&query_type, scope, cache, &ctx, limit, offset)?
+            run_query_expanded(&query_type, scope, cache, &ctx, limit, offset, glob)?
         }
-        _ => run_query_basic(&query_type, scope, cache, limit, offset)?,
+        _ => run_query_basic(&query_type, scope, cache, limit, offset, glob)?,
     };
 
     match budget_tokens {
@@ -285,6 +237,7 @@ fn run_query_expanded(
     ctx: &ExpandedCtx,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
 ) -> Result<String, TilthError> {
     match query_type {
         QueryType::Symbol(name) => search::search_symbol_expanded(
@@ -298,10 +251,19 @@ fn run_query_expanded(
             None,
             limit,
             offset,
+            glob,
         ),
-        QueryType::Concept(text) if text.contains(' ') => {
-            search::search_content_expanded(text, scope, cache, &ctx.session, ctx.expand, None, limit, offset)
-        }
+        QueryType::Concept(text) if text.contains(' ') => search::search_content_expanded(
+            text,
+            scope,
+            cache,
+            &ctx.session,
+            ctx.expand,
+            None,
+            limit,
+            offset,
+            glob,
+        ),
         QueryType::Concept(text) | QueryType::Fallthrough(text) => search::search_symbol_expanded(
             text,
             scope,
@@ -313,13 +275,31 @@ fn run_query_expanded(
             None,
             limit,
             offset,
+            glob,
         ),
-        QueryType::Content(text) => {
-            search::search_content_expanded(text, scope, cache, &ctx.session, ctx.expand, None, limit, offset)
-        }
-        QueryType::Regex(pattern) => {
-            search::search_regex_expanded(pattern, scope, cache, &ctx.session, ctx.expand, None, limit, offset)
-        }
+        QueryType::Content(text) => search::search_content_expanded(
+            text,
+            scope,
+            cache,
+            &ctx.session,
+            ctx.expand,
+            None,
+            limit,
+            offset,
+            glob,
+        ),
+        QueryType::Regex(pattern) => search::search_regex_expanded(
+            pattern,
+            scope,
+            cache,
+            &ctx.session,
+            ctx.expand,
+            None,
+            limit,
+            offset,
+            glob,
+        ),
+        // FilePath/Glob never reach here (gated by use_expanded)
         QueryType::FilePath(_) | QueryType::Glob(_) => {
             unreachable!("non-search query type in expanded path")
         }
@@ -327,25 +307,27 @@ fn run_query_expanded(
 }
 
 /// Dispatch search queries in basic mode (no expansion).
+/// Only called for search query types — FilePath/Glob are handled before this.
 fn run_query_basic(
     query_type: &QueryType,
     scope: &Path,
     cache: &OutlineCache,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
 ) -> Result<String, TilthError> {
     match query_type {
-        QueryType::Symbol(name) => search::search_symbol(name, scope, cache, limit, offset),
+        QueryType::Symbol(name) => search::search_symbol(name, scope, cache, glob),
         QueryType::Concept(text) if text.contains(' ') => {
-            multi_word_concept_search(text, scope, cache, limit, offset)
+            multi_word_concept_search(text, scope, cache, limit, offset, glob)
         }
         QueryType::Concept(text) => {
-            single_query_search(text, scope, cache, true, limit, offset)
+            single_query_search(text, scope, cache, true, limit, offset, glob)
         }
-        QueryType::Content(text) => search::search_content(text, scope, cache, limit, offset),
-        QueryType::Regex(pattern) => search::search_regex(pattern, scope, cache, limit, offset),
+        QueryType::Content(text) => search::search_content(text, scope, cache, glob),
+        QueryType::Regex(pattern) => search::search_regex(pattern, scope, cache, glob),
         QueryType::Fallthrough(text) => {
-            single_query_search(text, scope, cache, false, limit, offset)
+            single_query_search(text, scope, cache, false, limit, offset, glob)
         }
         QueryType::FilePath(_) | QueryType::Glob(_) => {
             unreachable!("non-search query type in basic path")
@@ -365,9 +347,9 @@ fn single_query_search(
     prefer_definitions: bool,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
 ) -> Result<String, error::TilthError> {
-    let mut sym_result = search::search_symbol_raw(text, scope)?;
-    paginate(&mut sym_result, limit, offset);
+    let mut sym_result = search::search_symbol_raw(text, scope, glob)?;
     let accept_sym = if prefer_definitions {
         sym_result.definitions > 0
     } else {
@@ -375,17 +357,19 @@ fn single_query_search(
     };
 
     if accept_sym {
+        paginate(&mut sym_result, limit, offset);
         return search::format_raw_result(&sym_result, cache);
     }
 
-    let mut content_result = search::search_content_raw(text, scope)?;
-    paginate(&mut content_result, limit, offset);
+    let mut content_result = search::search_content_raw(text, scope, None)?;
     if content_result.total_found > 0 {
+        paginate(&mut content_result, limit, offset);
         return search::format_raw_result(&content_result, cache);
     }
 
     // For concept queries: if symbol had usages but no definitions, show those
     if prefer_definitions && sym_result.total_found > 0 {
+        paginate(&mut sym_result, limit, offset);
         return search::format_raw_result(&sym_result, cache);
     }
 
@@ -402,11 +386,13 @@ fn multi_word_concept_search(
     cache: &cache::OutlineCache,
     limit: Option<usize>,
     offset: usize,
+    glob: Option<&str>,
 ) -> Result<String, error::TilthError> {
-    let mut content_result = search::search_content_raw(text, scope)?;
-    paginate(&mut content_result, limit, offset);
+    // Try exact phrase match first
+    let mut content_result = search::search_content_raw(text, scope, None)?;
     content_result.query = text.to_string();
     if content_result.total_found > 0 {
+        paginate(&mut content_result, limit, offset);
         return search::format_raw_result(&content_result, cache);
     }
 
@@ -429,10 +415,10 @@ fn multi_word_concept_search(
             .join("|")
     };
 
-    let mut relaxed_result = search::search_regex_raw(&relaxed, scope)?;
-    paginate(&mut relaxed_result, limit, offset);
+    let mut relaxed_result = search::search_regex_raw(&relaxed, scope, glob)?;
     relaxed_result.query = text.to_string();
     if relaxed_result.total_found > 0 {
+        paginate(&mut relaxed_result, limit, offset);
         return search::format_raw_result(&relaxed_result, cache);
     }
 
@@ -441,4 +427,52 @@ fn multi_word_concept_search(
         path: scope.join(text),
         suggestion: read::suggest_similar_file(scope, first_word),
     })
+}
+
+/// Apply limit/offset pagination to a SearchResult.
+fn paginate(result: &mut crate::types::SearchResult, limit: Option<usize>, offset: usize) {
+    let total = result.matches.len();
+    if offset > 0 {
+        if offset >= total {
+            result.matches.clear();
+        } else {
+            result.matches = result.matches.split_off(offset);
+        }
+    }
+    if let Some(cap) = limit {
+        if result.matches.len() > cap {
+            result.matches.truncate(cap);
+            result.has_more = true;
+        }
+    }
+    result.offset = offset;
+}
+
+/// List only matching file paths (no content).
+pub fn run_files(
+    query: &str,
+    scope: &Path,
+    cache: &OutlineCache,
+) -> Result<String, TilthError> {
+    let query_type = classify(query, scope);
+    let glob = None;
+    let result = match query_type {
+        QueryType::Symbol(name) => search::search_symbol_raw(&name, scope, glob)?,
+        QueryType::Content(text) | QueryType::Concept(text) | QueryType::Fallthrough(text) => {
+            search::search_content_raw(&text, scope, glob)?
+        }
+        QueryType::Regex(pattern) => search::search_regex_raw(&pattern, scope, glob)?,
+        QueryType::Glob(pattern) => return search::search_glob(&pattern, scope, cache),
+        QueryType::FilePath(path) => {
+            return Ok(path.display().to_string());
+        }
+    };
+    let mut files: Vec<_> = result
+        .matches
+        .iter()
+        .map(|m| m.path.display().to_string())
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files.join("\n"))
 }
