@@ -48,6 +48,7 @@ regex-syntax = "0.8"
 # Byte scanning (SIMD-accelerated)
 memchr = "2"
 aho-corasick = "1"
+mimalloc = { version = "0.1", default-features = false }
 memmap2 = "0.9"
 
 # Parallelism

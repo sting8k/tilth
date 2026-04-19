@@ -5,6 +5,11 @@ use std::process;
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 
+// mimalloc: faster than system allocator for parallel walker workloads
+// where many small Strings/Vecs are allocated across rayon threads.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// tilth — Tree-sitter indexed lookups, smart code reading for AI agents.
 /// One tool replaces `read_file`, grep, glob, `ast_grep`, and find.
 #[derive(Parser)]
