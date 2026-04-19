@@ -119,6 +119,12 @@ fn find_definitions(
                 Err(_) => return ignore::WalkState::Continue,
             };
 
+            // Skip minified/bundled assets by filename — they're parseable but
+            // tree-sitter costs 100-500ms on them with zero useful defs.
+            if super::is_minified_filename(path) {
+                return ignore::WalkState::Continue;
+            }
+
             // Fast byte-level scan: mmap (or heap-read for tiny files) +
             // memchr SIMD search. Skips UTF-8 validation on ~90% of files
             // that don't contain the symbol.
@@ -127,6 +133,12 @@ fn find_definitions(
             };
 
             if memchr::memmem::find(&bytes, needle).is_none() {
+                return ignore::WalkState::Continue;
+            }
+
+            // Content-based minified detection for large files that slipped
+            // through filename check (e.g. `app.js` actually minified).
+            if file_size >= super::MINIFIED_CHECK_THRESHOLD && super::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
 

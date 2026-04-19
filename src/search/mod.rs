@@ -95,6 +95,38 @@ impl std::ops::Deref for FileBytes {
 /// Threshold below which `read` outperforms `mmap` due to syscall overhead.
 const MMAP_THRESHOLD: u64 = 16_384;
 
+/// Size above which we apply minified-file detection.
+/// Below this, parsing cost is negligible anyway.
+const MINIFIED_CHECK_THRESHOLD: u64 = 100_000;
+
+/// Is this path obviously a minified file based on filename convention?
+///
+/// Only flags `.min.` / `-min.` stems — a 10+ year-old strong convention.
+/// No attempt to guess from bundler output names like "bundle.js" or
+/// "vendor.js" — those can be genuine user code. Content-based detection
+/// (`looks_minified`) catches the rest.
+pub(crate) fn is_minified_filename(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(stem_end) = name.rfind('.') else {
+        return false;
+    };
+    let stem = &name[..stem_end];
+    stem.ends_with(".min") || stem.ends_with("-min")
+}
+
+/// Heuristic: does this content look minified? Samples first 2KB and checks
+/// average line length. Minified code typically has <4 newlines per 2KB.
+///
+/// Only call this on files ≥ `MINIFIED_CHECK_THRESHOLD` — for small files
+/// the cost of parsing is bounded regardless.
+pub(crate) fn looks_minified(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(2048)];
+    let newlines = memchr::memchr_iter(b'\n', sample).count();
+    newlines < 4
+}
+
 pub(crate) fn read_file_bytes(path: &Path, size: u64) -> Option<FileBytes> {
     if size == 0 {
         return None;

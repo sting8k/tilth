@@ -76,6 +76,9 @@ pub fn find_callers(
             if file_len > 500_000 {
                 return ignore::WalkState::Continue;
             }
+            if super::is_minified_filename(path) {
+                return ignore::WalkState::Continue;
+            }
 
             // Fast byte-level scan: mmap + memchr SIMD pre-filter.
             let Some(bytes) = super::read_file_bytes(path, file_len) else {
@@ -83,6 +86,10 @@ pub fn find_callers(
             };
 
             if memchr::memmem::find(&bytes, needle).is_none() {
+                return ignore::WalkState::Continue;
+            }
+
+            if file_len >= super::MINIFIED_CHECK_THRESHOLD && super::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
 
@@ -276,6 +283,9 @@ pub(crate) fn find_callers_batch(
             if file_len > 500_000 {
                 return ignore::WalkState::Continue;
             }
+            if super::is_minified_filename(path) {
+                return ignore::WalkState::Continue;
+            }
 
             // Fast byte-level scan: mmap + multi-pattern pre-filter.
             let Some(bytes) = super::read_file_bytes(path, file_len) else {
@@ -290,6 +300,10 @@ pub(crate) fn find_callers_batch(
                     .any(|t| memchr::memmem::find(&bytes, t.as_bytes()).is_some())
             };
             if !any_match {
+                return ignore::WalkState::Continue;
+            }
+
+            if file_len >= super::MINIFIED_CHECK_THRESHOLD && super::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
 
