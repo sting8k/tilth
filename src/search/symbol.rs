@@ -166,7 +166,7 @@ fn find_definitions_batch(
                         continue;
                     }
                     let defs =
-                        find_defs_treesitter(path, q, ts_lang, content, file_lines, mtime, cache);
+                        find_defs_treesitter(path, q, ts_lang, lang, content, file_lines, mtime, cache);
                     if !defs.is_empty() {
                         local[i] = defs;
                     }
@@ -442,7 +442,9 @@ fn find_definitions(
             let ts_language = lang.and_then(outline_language);
 
             let mut file_defs = if let Some(ref ts_lang) = ts_language {
-                find_defs_treesitter(path, query, ts_lang, lang, content, file_lines, mtime, cache)
+                find_defs_treesitter(
+                    path, query, ts_lang, lang, content, file_lines, mtime, cache,
+                )
             } else {
                 Vec::new()
             };
@@ -886,6 +888,7 @@ pub(crate) fn dispatch_tool(tool: &str) -> Result<String, String> {
             code,
             lines,
             SystemTime::now(),
+            None,
         )
     }
 
