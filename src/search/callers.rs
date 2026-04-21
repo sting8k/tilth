@@ -809,6 +809,73 @@ pub struct HopStats {
     pub edges: usize,
 }
 
+/// Hops where most edges land outside directories seen in the previous hop —
+/// strong signal of cross-package name collision (e.g. hop 1 finds `pool.New`,
+/// hop 2 then matches every unrelated `errors.New` / `bytes.NewBuffer` / ...).
+/// Lang-agnostic: uses filesystem path proximity, no package concept.
+#[derive(Debug, Clone)]
+pub struct SuspicionInfo {
+    pub hop: usize,
+    pub total_edges: usize,
+    pub related_edges: usize, // share parent dir with any hop N-1 file
+}
+
+/// Threshold above which low related-ratio is flagged. Small hops are ignored —
+/// 5 spurious edges out of 5 is noise, 490 out of 500 is a real collision.
+const SUSPICION_MIN_EDGES: usize = 50;
+/// Related-ratio cutoff: if fewer than 1 in 5 edges share a dir with the
+/// previous hop, flag the hop as suspect.
+const SUSPICION_RELATED_NUM: usize = 1;
+const SUSPICION_RELATED_DEN: usize = 5;
+
+/// Scan completed BFS edges for hops whose matches are mostly "far" from the
+/// previous hop's file paths. Pure function — unit-testable in isolation.
+pub fn compute_suspicious_hops(edges: &[BfsEdge]) -> Vec<SuspicionInfo> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut by_hop: BTreeMap<usize, Vec<&BfsEdge>> = BTreeMap::new();
+    for e in edges {
+        by_hop.entry(e.hop).or_default().push(e);
+    }
+    let mut out = Vec::new();
+    for (&hop, list) in &by_hop {
+        if hop < 2 {
+            continue;
+        }
+        let total = list.len();
+        if total < SUSPICION_MIN_EDGES {
+            continue;
+        }
+        let prev = match by_hop.get(&(hop - 1)) {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
+        let prev_dirs: HashSet<&Path> = prev
+            .iter()
+            .filter_map(|e| e.from_file.parent())
+            .collect();
+        if prev_dirs.is_empty() {
+            continue;
+        }
+        let related = list
+            .iter()
+            .filter(|e| {
+                e.from_file
+                    .parent()
+                    .is_some_and(|p| prev_dirs.contains(p))
+            })
+            .count();
+        // related / total < NUM / DEN  ⇔  related * DEN < total * NUM
+        if related * SUSPICION_RELATED_DEN < total * SUSPICION_RELATED_NUM {
+            out.push(SuspicionInfo {
+                hop,
+                total_edges: total,
+                related_edges: related,
+            });
+        }
+    }
+    out
+}
+
 /// Threshold for auto-hub promotion: if a single symbol produces this many
 /// edges in one hop, treat it as a hub and drop from the next frontier.
 /// Data-driven, language-agnostic — no hard-coded hub list.
@@ -1110,6 +1177,17 @@ fn format_bfs(
             stats.unresolved_symbols
         ));
     }
+    let suspicious = compute_suspicious_hops(edges);
+    for s in &suspicious {
+        notes.push(format!(
+            "⚠ hop {}: {} edges, only {} share a directory with hop {} — likely cross-package name collision (try qualifying the target, e.g. `pkg::{}`)",
+            s.hop,
+            s.total_edges,
+            s.related_edges,
+            s.hop - 1,
+            target
+        ));
+    }
     if !notes.is_empty() {
         let _ = writeln!(out, "\n── budget ──");
         for n in notes {
@@ -1187,6 +1265,18 @@ fn format_bfs_json(
         .map(|(s, c)| serde_json::json!({"symbol": s, "edges": c}))
         .collect();
 
+    let suspicious_json: Vec<serde_json::Value> = compute_suspicious_hops(edges)
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "hop": s.hop,
+                "total_edges": s.total_edges,
+                "related_edges": s.related_edges,
+                "reason": "name_collision",
+            })
+        })
+        .collect();
+
     let payload = serde_json::json!({
         "root": target,
         "scope": scope.display().to_string(),
@@ -1199,6 +1289,7 @@ fn format_bfs_json(
             "per_hop": per_hop,
             "top_level_terminal": stats.top_level_terminal,
             "unresolved_symbols": stats.unresolved_symbols,
+            "suspicious_hops": suspicious_json,
         },
         "elided": {
             "edges_cut_at_hop": stats.edges_cut_at_hop,
@@ -1212,4 +1303,85 @@ fn format_bfs_json(
 
     serde_json::to_string_pretty(&payload)
         .expect("serde_json::Value is always serializable")
+}
+
+#[cfg(test)]
+mod suspicion_tests {
+    use super::*;
+
+    fn edge(hop: usize, file: &str, line: u32, to: &str) -> BfsEdge {
+        BfsEdge {
+            hop,
+            from: "f".into(),
+            from_file: PathBuf::from(file),
+            from_line: line,
+            to: to.into(),
+        }
+    }
+
+    #[test]
+    fn ignores_small_hops() {
+        // 10 edges, all in distant dirs — below SUSPICION_MIN_EDGES.
+        let mut edges = vec![edge(1, "a/root.rs", 1, "x")];
+        for i in 0..10 {
+            edges.push(edge(2, &format!("z/far{i}.rs"), i, "y"));
+        }
+        assert!(compute_suspicious_hops(&edges).is_empty());
+    }
+
+    #[test]
+    fn flags_cross_package_collision() {
+        // hop 1 rooted in pkg/a, hop 2 has 60 matches in unrelated dirs.
+        let mut edges = vec![edge(1, "pkg/a/root.go", 1, "New")];
+        for i in 0..60 {
+            edges.push(edge(2, &format!("vendor/errors/err{i}.go"), i, "New"));
+        }
+        let sus = compute_suspicious_hops(&edges);
+        assert_eq!(sus.len(), 1);
+        assert_eq!(sus[0].hop, 2);
+        assert_eq!(sus[0].total_edges, 60);
+        assert_eq!(sus[0].related_edges, 0);
+    }
+
+    #[test]
+    fn no_flag_when_related_majority() {
+        // hop 2 matches all live in same dir as hop 1 callers.
+        let mut edges = vec![edge(1, "pkg/a/root.go", 1, "X")];
+        for i in 0..60 {
+            edges.push(edge(2, &format!("pkg/a/file{i}.go"), i, "Y"));
+        }
+        assert!(compute_suspicious_hops(&edges).is_empty());
+    }
+
+    #[test]
+    fn threshold_boundary() {
+        // 50 edges, 10 related = 20% = exactly at cutoff (1/5). Should NOT flag.
+        let mut edges = vec![edge(1, "pkg/a/root.go", 1, "X")];
+        for i in 0..10 {
+            edges.push(edge(2, &format!("pkg/a/rel{i}.go"), i, "Y"));
+        }
+        for i in 0..40 {
+            edges.push(edge(2, &format!("far/dir/far{i}.go"), i, "Y"));
+        }
+        // 10/50 = 0.2, 10*5 = 50 = 50*1 → not strictly less → no flag.
+        assert!(compute_suspicious_hops(&edges).is_empty());
+        // 9/50 → flag.
+        let mut edges = vec![edge(1, "pkg/a/root.go", 1, "X")];
+        for i in 0..9 {
+            edges.push(edge(2, &format!("pkg/a/rel{i}.go"), i, "Y"));
+        }
+        for i in 0..41 {
+            edges.push(edge(2, &format!("far/dir/far{i}.go"), i, "Y"));
+        }
+        assert_eq!(compute_suspicious_hops(&edges).len(), 1);
+    }
+
+    #[test]
+    fn never_flags_hop_1() {
+        let mut edges = Vec::new();
+        for i in 0..100 {
+            edges.push(edge(1, &format!("any/dir{i}/f.go"), i, "X"));
+        }
+        assert!(compute_suspicious_hops(&edges).is_empty());
+    }
 }
