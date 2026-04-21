@@ -784,6 +784,10 @@ pub struct BfsEdge {
     pub from_file: PathBuf,
     pub from_line: u32,
     pub to: String,
+    /// Call-site source text (single line). Matches legacy `--callers` output:
+    /// for a call spanning multiple lines, the first line is kept. Empty only
+    /// when the underlying `CallerMatch.call_text` was empty.
+    pub call_text: String,
 }
 
 /// Aggregated BFS result.
@@ -1003,12 +1007,24 @@ pub fn search_callers_bfs(
                 next_frontier.insert(m.calling_function.clone());
             }
 
+            // Reduce call_text to a single line — multi-line calls collapse to
+            // their first line. Mirrors legacy --callers convention; bounds
+            // per-edge token cost without truncating mid-token.
+            let call_text = m
+                .call_text
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
             edges.push(BfsEdge {
                 hop,
                 from: m.calling_function,
                 from_file: m.path,
                 from_line: m.line,
                 to: callee,
+                call_text,
             });
 
             if edges.len() >= max_edges {
@@ -1117,13 +1133,21 @@ fn format_bfs(
             if list.len() == 1 { "" } else { "s" });
         for e in list {
             let rel = e.from_file.strip_prefix(scope).unwrap_or(&e.from_file);
+            // Match legacy `--callers` convention: payload is the call-site
+            // source text, not the bare callee symbol. Fall back to the
+            // symbol only when call_text is unavailable.
+            let payload = if e.call_text.is_empty() {
+                e.to.as_str()
+            } else {
+                e.call_text.as_str()
+            };
             let _ = writeln!(
                 out,
                 "  {:<28} {}:{}  → {}",
                 e.from,
                 rel.display(),
                 e.from_line,
-                e.to
+                payload
             );
         }
     }
@@ -1233,6 +1257,7 @@ fn format_bfs_json(
                 "from_file": rel,
                 "from_line": e.from_line,
                 "to": e.to,
+                "call_text": e.call_text,
             })
         })
         .collect();
@@ -1316,6 +1341,7 @@ mod suspicion_tests {
             from_file: PathBuf::from(file),
             from_line: line,
             to: to.into(),
+            call_text: String::new(),
         }
     }
 
