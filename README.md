@@ -86,6 +86,20 @@ cargo install --git https://github.com/sting8k/tilth --tag v0.7.0 --locked tilth
 cargo install tilth
 ```
 
+## Agent skill
+
+For agents that use tilth via plain bash (Claude Code, Cursor, pi, cowork, anything that doesn't speak MCP), a ready-to-load skill prompt lives at [`skills/SKILL.md`](./skills/SKILL.md). Drop it into your agent's skills directory and the agent will reach for tilth instead of `cat`/`grep`/`find` on code reads, with the right flags for pagination, outlines, callers, deps, and progressive reads already wired in.
+
+Most agents follow the same convention — a `<skill-name>/SKILL.md` file under a global skills directory. Install once globally:
+
+```sh
+mkdir -p ~/.<your-agent>/skills/tilth && \
+curl -L https://raw.githubusercontent.com/sting8k/tilth/another-tilth/skills/SKILL.md \
+  -o ~/.<your-agent>/skills/tilth/SKILL.md
+```
+
+Replace `~/.<your-agent>/skills/` with the actual skills path your agent reads (`~/.claude/skills/`, `~/.pi/agent/skills/`, etc.). For agents that use a single rules file instead of skill discovery (Cursor, Windsurf), paste the body of `SKILL.md` (without the YAML frontmatter) into your rules / custom-instructions file.
+
 ## Usage
 
 ```bash
@@ -239,20 +253,6 @@ Edits use these hashes as anchors. If the file changed since the last read, hash
 ```
 
 Inspired by [The Harness Problem](https://blog.can.ac/2026/02/12/the-harness-problem/).
-
-## Agent skill
-
-For agents that use tilth via plain bash (Claude Code, Cursor, pi, cowork, anything that doesn't speak MCP), a ready-to-load skill prompt lives at [`skills/SKILL.md`](./skills/SKILL.md). Drop it into your agent's skills directory and the agent will reach for tilth instead of `cat`/`grep`/`find` on code reads, with the right flags for pagination, outlines, callers, deps, and progressive reads already wired in.
-
-Most agents follow the same convention — a `<skill-name>/SKILL.md` file under a global skills directory. Install once globally:
-
-```sh
-mkdir -p ~/.<your-agent>/skills/tilth && \
-curl -L https://raw.githubusercontent.com/sting8k/tilth/another-tilth/skills/SKILL.md \
-  -o ~/.<your-agent>/skills/tilth/SKILL.md
-```
-
-Replace `~/.<your-agent>/skills/` with the actual skills path your agent reads (`~/.claude/skills/`, `~/.pi/agent/skills/`, etc.). For agents that use a single rules file instead of skill discovery (Cursor, Windsurf), paste the body of `SKILL.md` (without the YAML frontmatter) into your rules / custom-instructions file.
 
 ## Speed
 
