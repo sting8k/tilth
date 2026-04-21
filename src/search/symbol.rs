@@ -19,7 +19,7 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 
 /// Multi-symbol batch search.
-/// Single-walk: each file is opened/parsed once; AhoCorasick gates by any-query hit;
+/// Single-walk: each file is opened/parsed once; `AhoCorasick` gates by any-query hit;
 /// tree-sitter AST walked once with per-query buckets. Same for usages.
 /// Returns one `SearchResult` per query in input order.
 pub fn search_batch(
@@ -48,7 +48,7 @@ pub fn search_batch(
         .map(|q| regex_syntax::escape(q))
         .collect::<Vec<_>>()
         .join("|");
-    let pattern = format!(r"\b(?:{})\b", alt);
+    let pattern = format!(r"\b(?:{alt})\b");
     let matcher = RegexMatcher::new(&pattern).map_err(|e| TilthError::InvalidQuery {
         query: queries.join(","),
         reason: e.to_string(),
@@ -105,7 +105,6 @@ fn find_definitions_batch(
 
     walker.run(|| {
         let buckets = &buckets;
-        let cache = cache;
         Box::new(move |entry| {
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
@@ -378,7 +377,6 @@ fn find_definitions(
     walker.run(|| {
         let matches = &matches;
         let found_count = &found_count;
-        let cache = cache;
 
         Box::new(move |entry| {
             let Ok(entry) = entry else {
@@ -443,14 +441,14 @@ fn find_definitions(
             let ts_language = lang.and_then(outline_language);
 
             let mut file_defs = if let Some(ref ts_lang) = ts_language {
-                find_defs_treesitter(path, query, ts_lang, &content, file_lines, mtime, cache)
+                find_defs_treesitter(path, query, ts_lang, content, file_lines, mtime, cache)
             } else {
                 Vec::new()
             };
 
             // Fallback: keyword heuristic for files without grammars
             if file_defs.is_empty() && ts_language.is_none() {
-                file_defs = find_defs_heuristic_buf(path, query, &content, file_lines, mtime);
+                file_defs = find_defs_heuristic_buf(path, query, content, file_lines, mtime);
             }
 
             if !file_defs.is_empty() {
@@ -481,21 +479,20 @@ fn find_defs_treesitter(
     mtime: SystemTime,
     cache: Option<&crate::cache::OutlineCache>,
 ) -> Vec<Match> {
-    let tree = match cache {
-        Some(c) => match c.get_or_parse(path, mtime, content, ts_lang) {
-            Some(t) => t,
-            None => return Vec::new(),
-        },
-        None => {
-            let mut parser = tree_sitter::Parser::new();
-            if parser.set_language(ts_lang).is_err() {
-                return Vec::new();
-            }
-            let Some(tree) = parser.parse(content, None) else {
-                return Vec::new();
-            };
-            tree
+    let tree = if let Some(c) = cache {
+        let Some(tree) = c.get_or_parse(path, mtime, content, ts_lang) else {
+            return Vec::new();
+        };
+        tree
+    } else {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(ts_lang).is_err() {
+            return Vec::new();
         }
+        let Some(tree) = parser.parse(content, None) else {
+            return Vec::new();
+        };
+        tree
     };
 
     let lines: Vec<&str> = content.lines().collect();

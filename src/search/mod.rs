@@ -113,7 +113,10 @@ pub(crate) fn is_minified_filename(path: &Path) -> bool {
         return false;
     };
     let stem = &name[..stem_end];
-    stem.ends_with(".min") || stem.ends_with("-min")
+    let dot_min = std::path::Path::new(stem)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("min"));
+    dot_min || stem.to_ascii_lowercase().ends_with("-min")
 }
 
 /// Heuristic: does this content look minified? Samples first 2KB and checks
@@ -287,8 +290,9 @@ pub fn search_multi_symbol_expanded(
     results.sort_by(|a, b| a.matches.len().cmp(&b.matches.len()));
 
     // Phase 2: format sequentially (format_matches touches the session mutex
-    // and a shared expanded_files set — cheap, keep single-threaded).
+    // and shared sets — cheap, keep single-threaded).
     let mut expanded_files = HashSet::new();
+    let mut context_shown_files = HashSet::new();
     for mut result in results {
         paginate(&mut result, limit, offset);
         let mut out = format::search_header(
@@ -307,6 +311,7 @@ pub fn search_multi_symbol_expanded(
             bloom,
             &mut budget,
             &mut expanded_files,
+            &mut context_shown_files,
             &mut out,
         );
         if result.total_found > result.matches.len() {
@@ -443,6 +448,7 @@ fn format_matches(
     bloom: &crate::index::bloom::BloomFilterCache,
     expand_remaining: &mut usize,
     expanded_files: &mut HashSet<PathBuf>,
+    context_shown_files: &mut HashSet<PathBuf>,
     out: &mut String,
 ) {
     // Multi-file: one expand per unique file. Single-file: sequential per-match.
@@ -466,12 +472,13 @@ fn format_matches(
                 bloom,
                 expand_remaining,
                 expanded_files,
+                context_shown_files,
                 multi_file,
                 out,
             );
         } else {
             // Multiple usages collapsed into one entry
-            format_grouped_usages(group, scope, cache, out);
+            format_grouped_usages(group, scope, cache, context_shown_files, out);
         }
     }
 }
@@ -534,7 +541,13 @@ fn group_matches<'a>(matches: &'a [Match], cache: &OutlineCache) -> Vec<Vec<&'a 
 }
 
 /// Format a group of usages collapsed into a single entry.
-fn format_grouped_usages(group: &[&Match], scope: &Path, cache: &OutlineCache, out: &mut String) {
+fn format_grouped_usages(
+    group: &[&Match],
+    scope: &Path,
+    cache: &OutlineCache,
+    context_shown_files: &mut HashSet<PathBuf>,
+    out: &mut String,
+) {
     let first = group[0];
     let path_str = rel(&first.path, scope);
 
@@ -560,9 +573,19 @@ fn format_grouped_usages(group: &[&Match], scope: &Path, cache: &OutlineCache, o
     }
     out.push(']');
 
-    // Show outline context once for the group
-    if let Some(context) = outline_context_for_match(&first.path, first.line, cache) {
-        out.push_str(&context);
+    // Show outline context only once per file to avoid repeated imports/module noise.
+    if context_shown_files.insert(first.path.clone()) {
+        if let Some(context) = outline_context_for_match(&first.path, first.line, cache) {
+            out.push_str(&context);
+        } else {
+            let _ = write!(out, "\n→ [{}]   {}", first.line, first.text);
+        }
+    } else {
+        let _ = write!(
+            out,
+            "\n→ [{}]   {} [context shown earlier]",
+            first.line, first.text
+        );
     }
 }
 
@@ -609,6 +632,7 @@ fn format_single_match(
     bloom: &crate::index::bloom::BloomFilterCache,
     expand_remaining: &mut usize,
     expanded_files: &mut HashSet<PathBuf>,
+    context_shown_files: &mut HashSet<PathBuf>,
     multi_file: bool,
     out: &mut String,
 ) {
@@ -637,13 +661,19 @@ fn format_single_match(
         let _ = write!(out, "\n\n## {}:{} [{kind}]", rel(&m.path, scope), m.line);
     }
 
-    // Skip outline for small files — the expanded code speaks for itself
+    // Skip outline for small files — the expanded code speaks for itself.
+    // For larger files, show outline context only once per file to avoid
+    // repeated imports/module headers across consecutive matches.
     if m.file_lines < 50 {
         let _ = write!(out, "\n→ [{}]   {}", m.line, m.text);
-    } else if let Some(context) = outline_context_for_match(&m.path, m.line, cache) {
-        out.push_str(&context);
+    } else if context_shown_files.insert(m.path.clone()) {
+        if let Some(context) = outline_context_for_match(&m.path, m.line, cache) {
+            out.push_str(&context);
+        } else {
+            let _ = write!(out, "\n→ [{}]   {}", m.line, m.text);
+        }
     } else {
-        let _ = write!(out, "\n→ [{}]   {}", m.line, m.text);
+        let _ = write!(out, "\n→ [{}]   {} [context shown earlier]", m.line, m.text);
     }
 
     if *expand_remaining > 0 {
@@ -969,6 +999,7 @@ fn format_search_result(
     let mut out = header;
     let mut expand_remaining = expand;
     let mut expanded_files = HashSet::new();
+    let mut context_shown_files = HashSet::new();
 
     // File-level retrieval: when a file basename matches the query exactly,
     // prepend a compact outline so the agent gets file-level context first.
@@ -993,6 +1024,7 @@ fn format_search_result(
                 bloom,
                 &mut expand_remaining,
                 &mut expanded_files,
+                &mut context_shown_files,
                 &mut out,
             );
         }
@@ -1011,6 +1043,7 @@ fn format_search_result(
                 bloom,
                 &mut expand_remaining,
                 &mut expanded_files,
+                &mut context_shown_files,
                 &mut out,
             );
         }
@@ -1043,6 +1076,7 @@ fn format_search_result(
                 bloom,
                 &mut expand_remaining,
                 &mut expanded_files,
+                &mut context_shown_files,
                 &mut out,
             );
         }
@@ -1061,6 +1095,7 @@ fn format_search_result(
                 bloom,
                 &mut expand_remaining,
                 &mut expanded_files,
+                &mut context_shown_files,
                 &mut out,
             );
         }
@@ -1074,6 +1109,7 @@ fn format_search_result(
             bloom,
             &mut expand_remaining,
             &mut expanded_files,
+            &mut context_shown_files,
             &mut out,
         );
     }
@@ -1670,7 +1706,7 @@ mod tests {
     }
 }
 
-/// Apply limit/offset pagination to a SearchResult.
+/// Apply limit/offset pagination to a `SearchResult`.
 pub(crate) fn paginate(result: &mut SearchResult, limit: Option<usize>, offset: usize) {
     let total = result.matches.len();
     if offset > 0 {

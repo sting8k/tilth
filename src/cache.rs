@@ -20,8 +20,8 @@ const PARSE_CACHE_LIMIT: usize = 2000;
 /// mtime changes and the old entry is never hit again.
 pub struct OutlineCache {
     entries: DashMap<(PathBuf, SystemTime), CacheEntry>,
-    /// Tree-sitter parse cache. Separate DashMap since Tree has no text-key lookup.
-    /// Cleared wholesale when it exceeds PARSE_CACHE_LIMIT entries.
+    /// Tree-sitter parse cache. Separate `DashMap` since `Tree` has no text-key lookup.
+    /// Cleared wholesale when it exceeds `PARSE_CACHE_LIMIT` entries.
     trees: DashMap<(PathBuf, SystemTime), tree_sitter::Tree>,
     tree_count: AtomicUsize,
 }
@@ -65,8 +65,8 @@ impl OutlineCache {
     /// Get cached parse tree or parse and cache it. Returns None if parsing fails
     /// or the language can't be set. Tree is cheap-clone (refcount internally).
     ///
-    /// Callers must pass content that matches `mtime` — stale content + fresh mtime
-    /// would poison the cache. In practice both come from the same fs::metadata read.
+    /// Callers must pass `content` that matches `mtime` — stale content + fresh `mtime`
+    /// would poison the cache. In practice both come from the same `fs::metadata` read.
     pub fn get_or_parse(
         &self,
         path: &Path,

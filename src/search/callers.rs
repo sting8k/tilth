@@ -54,7 +54,6 @@ pub fn find_callers(
     walker.run(|| {
         let matches = &matches;
         let found_count = &found_count;
-        let cache = cache;
 
         Box::new(move |entry| {
             let Ok(entry) = entry else {
@@ -116,7 +115,7 @@ pub fn find_callers(
             };
 
             let file_callers =
-                find_callers_treesitter(path, target, &ts_lang, &content, lang, mtime, cache);
+                find_callers_treesitter(path, target, &ts_lang, content, lang, mtime, cache);
 
             if !file_callers.is_empty() {
                 found_count.fetch_add(file_callers.len(), Ordering::Relaxed);
@@ -150,21 +149,20 @@ fn find_callers_treesitter(
         return Vec::new();
     };
 
-    let tree = match cache {
-        Some(c) => match c.get_or_parse(path, mtime, content, ts_lang) {
-            Some(t) => t,
-            None => return Vec::new(),
-        },
-        None => {
-            let mut parser = tree_sitter::Parser::new();
-            if parser.set_language(ts_lang).is_err() {
-                return Vec::new();
-            }
-            let Some(tree) = parser.parse(content, None) else {
-                return Vec::new();
-            };
-            tree
+    let tree = if let Some(c) = cache {
+        let Some(tree) = c.get_or_parse(path, mtime, content, ts_lang) else {
+            return Vec::new();
+        };
+        tree
+    } else {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(ts_lang).is_err() {
+            return Vec::new();
         }
+        let Some(tree) = parser.parse(content, None) else {
+            return Vec::new();
+        };
+        tree
     };
 
     let content_bytes = content.as_bytes();
@@ -269,7 +267,6 @@ pub(crate) fn find_callers_batch(
         let found_count = &found_count;
         let ac = ac.as_ref();
         let sorted_targets = &sorted_targets;
-        let cache = cache;
 
         Box::new(move |entry| {
             // Early termination: enough callers found
@@ -345,9 +342,8 @@ pub(crate) fn find_callers_batch(
                 return ignore::WalkState::Continue;
             };
 
-            let file_callers = find_callers_treesitter_batch(
-                path, targets, &ts_lang, &content, lang, mtime, cache,
-            );
+            let file_callers =
+                find_callers_treesitter_batch(path, targets, &ts_lang, content, lang, mtime, cache);
 
             if !file_callers.is_empty() {
                 found_count.fetch_add(file_callers.len(), Ordering::Relaxed);
@@ -382,21 +378,20 @@ fn find_callers_treesitter_batch(
         return Vec::new();
     };
 
-    let tree = match cache {
-        Some(c) => match c.get_or_parse(path, mtime, content, ts_lang) {
-            Some(t) => t,
-            None => return Vec::new(),
-        },
-        None => {
-            let mut parser = tree_sitter::Parser::new();
-            if parser.set_language(ts_lang).is_err() {
-                return Vec::new();
-            }
-            let Some(tree) = parser.parse(content, None) else {
-                return Vec::new();
-            };
-            tree
+    let tree = if let Some(c) = cache {
+        let Some(tree) = c.get_or_parse(path, mtime, content, ts_lang) else {
+            return Vec::new();
+        };
+        tree
+    } else {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(ts_lang).is_err() {
+            return Vec::new();
         }
+        let Some(tree) = parser.parse(content, None) else {
+            return Vec::new();
+        };
+        tree
     };
 
     let content_bytes = content.as_bytes();
@@ -607,10 +602,14 @@ pub fn search_callers_expanded(
         // Expand if requested and we have the range
         if i < expand {
             if let Some((start, end)) = caller.caller_range {
-                // Use cached content — no re-read needed
+                // Use cached content — no re-read needed.
+                // Show a compact window around the callsite (±2 lines)
+                // bounded by the enclosing function range.
                 let lines: Vec<&str> = caller.content.lines().collect();
-                let start_idx = (start as usize).saturating_sub(1);
-                let end_idx = (end as usize).min(lines.len());
+                let window_start = caller.line.saturating_sub(2).max(start);
+                let window_end = (caller.line + 2).min(end);
+                let start_idx = (window_start as usize).saturating_sub(1);
+                let end_idx = (window_end as usize).min(lines.len());
 
                 output.push('\n');
                 output.push_str("```\n");

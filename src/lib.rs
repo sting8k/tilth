@@ -138,7 +138,7 @@ pub fn run_callers(
 ) -> Result<String, TilthError> {
     let session = session::Session::new();
     let bloom = index::bloom::BloomFilterCache::new();
-    let expand = if expand > 0 { expand } else { 2 };
+    let expand = if expand > 0 { expand } else { 1 };
     let output = search::callers::search_callers_expanded(
         target, scope, cache, &session, &bloom, expand, None, limit, offset, glob,
     )?;

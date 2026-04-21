@@ -769,7 +769,6 @@ fn apply_hard_cap(output: String) -> String {
     if !truncated.ends_with('\n') {
         truncated.push('\n');
     }
-    use std::fmt::Write as _;
     let _ = write!(
         truncated,
         "\n⚠️  output truncated: {omitted} chars omitted (hard cap {MAX_OUTPUT_CHARS}). \

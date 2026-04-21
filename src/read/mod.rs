@@ -214,8 +214,14 @@ fn resolve_heading(buf: &[u8], heading: &str) -> Option<(usize, usize)> {
                 continue;
             }
 
-            // Check if this line matches the heading
-            if trimmed == heading_trimmed {
+            // Check if this line matches the heading (exact or with anchor/attribute suffix)
+            let matches = trimmed == heading_trimmed
+                || (trimmed.starts_with(heading_trimmed)
+                    && trimmed[heading_trimmed.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| c == ' ' || c == '{'));
+            if matches {
                 found_line = Some(line_idx + 1); // 1-indexed
                 break;
             }
@@ -292,9 +298,9 @@ fn read_section(path: &Path, range: &str, edit_mode: bool) -> Result<String, Til
     } else {
         return Err(TilthError::InvalidQuery {
             query: range.to_string(),
-            reason: format!(
+            reason:
                 "not a valid line range (e.g. \"45-89\"), heading (e.g. \"## Foo\"), or symbol name in this file"
-            ),
+                    .to_string(),
         });
     };
 
@@ -346,12 +352,11 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Resolve a symbol name to its line range using AST outline.
-/// Returns (start_line, end_line) if found.
+/// Returns (`start_line`, `end_line`) if found.
 fn resolve_symbol(buf: &[u8], path: &Path, symbol: &str) -> Option<(usize, usize)> {
     let content = std::str::from_utf8(buf).ok()?;
-    let lang = match detect_file_type(path) {
-        FileType::Code(l) => l,
-        _ => return None,
+    let FileType::Code(lang) = detect_file_type(path) else {
+        return None;
     };
     let entries = get_outline_entries(content, lang);
     find_symbol_in_entries(&entries, symbol)
