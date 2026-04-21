@@ -240,6 +240,10 @@ Edits use these hashes as anchors. If the file changed since the last read, hash
 
 Inspired by [The Harness Problem](https://blog.can.ac/2026/02/12/the-harness-problem/).
 
+## Agent skill
+
+For agents that use tilth via plain bash (Claude Code, Cursor, etc. — anything that doesn't speak MCP), a ready-to-load skill prompt lives at [`skills/SKILL.md`](./skills/SKILL.md). Drop it into your agent's skills directory and the agent will reach for tilth instead of `cat`/`grep`/`find` on code reads, with the right flags for pagination, outlines, callers, deps, and progressive reads already wired in.
+
 ## Speed
 
 CLI times on x86_64 Mac, 26–1060 file codebases. ~17ms process startup amortised in MCP mode.
