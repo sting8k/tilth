@@ -26,11 +26,61 @@ See [PR #64](https://github.com/jahala/tilth/pull/64) for the full rationale and
 
 ## Installation
 
+### Pre-built binary (recommended)
+
+Links below always resolve to the latest release.
+
+**macOS (Apple Silicon)**
+
 ```sh
-cargo install --git https://github.com/sting8k/tilth --branch another-tilth
+curl -L https://github.com/sting8k/tilth/releases/latest/download/tilth-aarch64-apple-darwin.tar.gz \
+  | tar xz -C /usr/local/bin
 ```
 
-For upstream tilth instead:
+**macOS (Intel)**
+
+```sh
+curl -L https://github.com/sting8k/tilth/releases/latest/download/tilth-x86_64-apple-darwin.tar.gz \
+  | tar xz -C /usr/local/bin
+```
+
+**Linux (x86_64, static musl)**
+
+```sh
+curl -L https://github.com/sting8k/tilth/releases/latest/download/tilth-x86_64-unknown-linux-musl.tar.gz \
+  | tar xz -C ~/.local/bin
+```
+
+**Linux (aarch64, static musl)**
+
+```sh
+curl -L https://github.com/sting8k/tilth/releases/latest/download/tilth-aarch64-unknown-linux-musl.tar.gz \
+  | tar xz -C ~/.local/bin
+```
+
+**Windows** — download `tilth-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/sting8k/tilth/releases/latest) and unzip.
+
+Verify build provenance (optional):
+
+```sh
+gh attestation verify tilth-<target>.tar.gz --owner sting8k
+```
+
+### From source (Cargo)
+
+Always latest (tracks `another-tilth` branch):
+
+```sh
+cargo install --git https://github.com/sting8k/tilth --branch another-tilth --locked tilth
+```
+
+Pin to a specific release:
+
+```sh
+cargo install --git https://github.com/sting8k/tilth --tag v0.7.0 --locked tilth
+```
+
+### Upstream tilth
 
 ```sh
 cargo install tilth
