@@ -80,7 +80,7 @@ pub fn find_callers(
             if file_len > 500_000 {
                 return ignore::WalkState::Continue;
             }
-            if crate::search::is_minified_filename(path) {
+            if crate::search::io::is_minified_filename(path) {
                 return ignore::WalkState::Continue;
             }
 
@@ -93,7 +93,7 @@ pub fn find_callers(
                 return ignore::WalkState::Continue;
             }
 
-            if file_len >= crate::search::MINIFIED_CHECK_THRESHOLD && crate::search::looks_minified(&bytes) {
+            if file_len >= crate::search::io::MINIFIED_CHECK_THRESHOLD && crate::search::io::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
 
@@ -302,7 +302,7 @@ pub(crate) fn find_callers_batch(
             if file_len > 500_000 {
                 return ignore::WalkState::Continue;
             }
-            if crate::search::is_minified_filename(path) {
+            if crate::search::io::is_minified_filename(path) {
                 return ignore::WalkState::Continue;
             }
 
@@ -322,7 +322,7 @@ pub(crate) fn find_callers_batch(
                 return ignore::WalkState::Continue;
             }
 
-            if file_len >= crate::search::MINIFIED_CHECK_THRESHOLD && crate::search::looks_minified(&bytes) {
+            if file_len >= crate::search::io::MINIFIED_CHECK_THRESHOLD && crate::search::io::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
 

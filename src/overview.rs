@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::lang::detect_file_type;
 use crate::read::imports::is_import_line;
-use crate::search::SKIP_DIRS;
+use crate::search::io::SKIP_DIRS;
 use crate::types::{FileType, Lang};
 
 /// Compute a project fingerprint for MCP initialization.

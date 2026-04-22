@@ -20,21 +20,15 @@ use std::path::{Path, PathBuf};
 use crate::cache::OutlineCache;
 use crate::error::TilthError;
 use crate::format;
+use crate::format::rel;
 use crate::read;
 use crate::session::Session;
 use crate::types::{estimate_tokens, FileType, Match, SearchResult};
 
-use self::io::{
-    file_metadata, is_minified_filename, looks_minified, parse_pattern, read_file_bytes, walker,
-    MINIFIED_CHECK_THRESHOLD,
-};
+use self::io::{file_metadata, parse_pattern, read_file_bytes, walker};
 use self::pagination::paginate;
 
 const EXPAND_FULL_FILE_THRESHOLD: u64 = 800;
-
-pub(crate) use self::io::SKIP_DIRS;
-
-use crate::format::rel;
 
 pub fn search_symbol(
     query: &str,
