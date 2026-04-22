@@ -46,9 +46,9 @@ pub fn classify(query: &str, scope: &Path) -> QueryType {
         }
     }
 
-    // 4. Pure numeric — always content search (HTTP codes, error numbers)
+    // 4. Pure numeric — fall through cascade (try symbol, then content as fallback)
     if query.bytes().all(|b| b.is_ascii_digit()) {
-        return QueryType::Content(query.into());
+        return QueryType::Fallthrough(query.into());
     }
 
     // 5. Bare filename — only check filesystem for queries that look like filenames
@@ -97,8 +97,9 @@ pub fn classify(query: &str, scope: &Path) -> QueryType {
         }
     }
 
-    // 9. Everything else
-    QueryType::Content(query.into())
+    // 9. Everything else — fall through to symbol→content cascade.
+    //    For raw plain-text/punctuation-heavy queries, prefer `rg` directly.
+    QueryType::Fallthrough(query.into())
 }
 
 /// Does this single-token query look like an exact symbol name?
@@ -330,14 +331,15 @@ mod tests {
     #[test]
     fn content_queries() {
         let scope = PathBuf::from(".");
-        assert!(matches!(classify("404", &scope), QueryType::Content(_)));
+        // Pure numeric → fallthrough cascade (no longer Content)
+        assert!(matches!(classify("404", &scope), QueryType::Fallthrough(_)));
         assert!(matches!(
             classify("TODO: fix this", &scope),
-            QueryType::Content(_)
+            QueryType::Fallthrough(_)
         ));
         assert!(matches!(
             classify("import { X }", &scope),
-            QueryType::Content(_)
+            QueryType::Fallthrough(_)
         ));
     }
 

@@ -10,10 +10,9 @@ pub enum QueryType {
     /// Broad concept query — single lowercase word or multi-word phrase
     /// that likely refers to a feature/module/flow rather than an exact symbol.
     Concept(String),
-    Content(String),
     /// Slash-wrapped regex: `/pattern/` → regex content search.
     Regex(String),
-    /// Path-like query that didn't resolve — try symbol, then content.
+    /// Path-like or unclassified query — try symbol, then content as fallback.
     Fallthrough(String),
 }
 

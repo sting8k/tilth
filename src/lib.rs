@@ -324,17 +324,6 @@ fn run_query_expanded(
             offset,
             glob,
         ),
-        QueryType::Content(text) => search::search_content_expanded(
-            text,
-            scope,
-            cache,
-            &ctx.session,
-            ctx.expand,
-            None,
-            limit,
-            offset,
-            glob,
-        ),
         QueryType::Regex(pattern) => search::search_regex_expanded(
             pattern,
             scope,
@@ -371,7 +360,6 @@ fn run_query_basic(
         QueryType::Concept(text) => {
             single_query_search(text, scope, cache, true, limit, offset, glob)
         }
-        QueryType::Content(text) => search::search_content(text, scope, cache, limit, offset, glob),
         QueryType::Regex(pattern) => {
             search::search_regex(pattern, scope, cache, limit, offset, glob)
         }

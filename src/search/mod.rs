@@ -325,21 +325,6 @@ pub fn search_multi_symbol_expanded(
     Ok(sections.join("\n\n---\n"))
 }
 
-pub fn search_content(
-    query: &str,
-    scope: &Path,
-    cache: &OutlineCache,
-    limit: Option<usize>,
-    offset: usize,
-    glob: Option<&str>,
-) -> Result<String, TilthError> {
-    let (pattern, is_regex) = parse_pattern(query);
-    let mut result = content::search(pattern, scope, is_regex, None, glob)?;
-    paginate(&mut result, limit, offset);
-    let bloom = crate::index::bloom::BloomFilterCache::new();
-    format_search_result(&result, cache, None, &bloom, 0)
-}
-
 pub fn search_regex(
     pattern: &str,
     scope: &Path,
