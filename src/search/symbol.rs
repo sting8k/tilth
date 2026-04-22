@@ -123,7 +123,7 @@ fn find_definitions_batch(
                 }
                 Err(_) => return ignore::WalkState::Continue,
             };
-            if super::is_minified_filename(path) {
+            if super::io::is_minified_filename(path) {
                 return ignore::WalkState::Continue;
             }
             let Some(bytes) = super::read_file_bytes(path, file_size) else {
@@ -141,7 +141,7 @@ fn find_definitions_batch(
                 return ignore::WalkState::Continue;
             }
 
-            if file_size >= super::MINIFIED_CHECK_THRESHOLD && super::looks_minified(&bytes) {
+            if file_size >= super::io::MINIFIED_CHECK_THRESHOLD && super::io::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
             let Ok(content) = std::str::from_utf8(&bytes) else {
@@ -404,7 +404,7 @@ fn find_definitions(
 
             // Skip minified/bundled assets by filename — they're parseable but
             // tree-sitter costs 100-500ms on them with zero useful defs.
-            if super::is_minified_filename(path) {
+            if super::io::is_minified_filename(path) {
                 return ignore::WalkState::Continue;
             }
 
@@ -421,7 +421,7 @@ fn find_definitions(
 
             // Content-based minified detection for large files that slipped
             // through filename check (e.g. `app.js` actually minified).
-            if file_size >= super::MINIFIED_CHECK_THRESHOLD && super::looks_minified(&bytes) {
+            if file_size >= super::io::MINIFIED_CHECK_THRESHOLD && super::io::looks_minified(&bytes) {
                 return ignore::WalkState::Continue;
             }
 

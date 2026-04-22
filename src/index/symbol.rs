@@ -83,7 +83,7 @@ impl SymbolIndex {
             .filter_entry(|entry| {
                 if entry.file_type().is_some_and(|ft| ft.is_dir()) {
                     if let Some(name) = entry.file_name().to_str() {
-                        return !crate::search::SKIP_DIRS.contains(&name);
+                        return !crate::search::io::SKIP_DIRS.contains(&name);
                     }
                 }
                 true

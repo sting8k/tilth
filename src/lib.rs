@@ -16,22 +16,18 @@
 pub(crate) mod budget;
 pub mod cache;
 pub(crate) mod classify;
-pub mod diff;
-pub(crate) mod edit;
 pub mod error;
 pub(crate) mod format;
 pub mod index;
-pub mod install;
 pub(crate) mod lang;
 pub mod map;
-pub mod mcp;
 pub mod overview;
 pub(crate) mod read;
 pub(crate) mod search;
 pub(crate) mod session;
 pub(crate) mod types;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use cache::OutlineCache;
 use classify::classify;
@@ -244,7 +240,7 @@ fn run_inner(
     // FilePath and Glob are read operations, not search — handle before expanded dispatch
     let output = match query_type {
         QueryType::FilePath(path) => {
-            let mut out = read::read_file(&path, section, full, cache, false)?;
+            let mut out = read::read_file(&path, section, full, cache)?;
             if section.is_none() && !full && read::would_outline(&path) {
                 let related = read::imports::resolve_related_files(&path);
                 if !related.is_empty() {
@@ -327,17 +323,6 @@ fn run_query_expanded(
             offset,
             glob,
         ),
-        QueryType::Content(text) => search::search_content_expanded(
-            text,
-            scope,
-            cache,
-            &ctx.session,
-            ctx.expand,
-            None,
-            limit,
-            offset,
-            glob,
-        ),
         QueryType::Regex(pattern) => search::search_regex_expanded(
             pattern,
             scope,
@@ -374,7 +359,6 @@ fn run_query_basic(
         QueryType::Concept(text) => {
             single_query_search(text, scope, cache, true, limit, offset, glob)
         }
-        QueryType::Content(text) => search::search_content(text, scope, cache, limit, offset, glob),
         QueryType::Regex(pattern) => {
             search::search_regex(pattern, scope, cache, limit, offset, glob)
         }
@@ -409,19 +393,19 @@ fn single_query_search(
     };
 
     if accept_sym {
-        search::paginate(&mut sym_result, limit, offset);
+        search::pagination::paginate(&mut sym_result, limit, offset);
         return search::format_raw_result(&sym_result, cache);
     }
 
     let mut content_result = search::search_content_raw(text, scope, glob)?;
     if content_result.total_found > 0 {
-        search::paginate(&mut content_result, limit, offset);
+        search::pagination::paginate(&mut content_result, limit, offset);
         return search::format_raw_result(&content_result, cache);
     }
 
     // For concept queries: if symbol had usages but no definitions, show those
     if prefer_definitions && sym_result.total_found > 0 {
-        search::paginate(&mut sym_result, limit, offset);
+        search::pagination::paginate(&mut sym_result, limit, offset);
         return search::format_raw_result(&sym_result, cache);
     }
 
@@ -444,7 +428,7 @@ fn multi_word_concept_search(
     let mut content_result = search::search_content_raw(text, scope, glob)?;
     content_result.query = text.to_string();
     if content_result.total_found > 0 {
-        search::paginate(&mut content_result, limit, offset);
+        search::pagination::paginate(&mut content_result, limit, offset);
         return search::format_raw_result(&content_result, cache);
     }
 
@@ -470,7 +454,7 @@ fn multi_word_concept_search(
     let mut relaxed_result = search::search_regex_raw(&relaxed, scope, glob)?;
     relaxed_result.query = text.to_string();
     if relaxed_result.total_found > 0 {
-        search::paginate(&mut relaxed_result, limit, offset);
+        search::pagination::paginate(&mut relaxed_result, limit, offset);
         return search::format_raw_result(&relaxed_result, cache);
     }
 
@@ -479,47 +463,4 @@ fn multi_word_concept_search(
         path: scope.join(text),
         suggestion: read::suggest_similar_file(scope, first_word),
     })
-}
-
-/// List only matching file paths (no content). Output: newline-separated paths
-/// relative to scope, sorted, deduped.
-pub fn run_files(
-    query: &str,
-    scope: &Path,
-    _cache: &OutlineCache,
-    glob: Option<&str>,
-) -> Result<String, TilthError> {
-    let query_type = classify(query, scope);
-    let paths: Vec<PathBuf> = match query_type {
-        QueryType::Symbol(name) => search::search_symbol_raw(&name, scope, glob)?
-            .matches
-            .into_iter()
-            .map(|m| m.path)
-            .collect(),
-        QueryType::Content(text) | QueryType::Concept(text) | QueryType::Fallthrough(text) => {
-            search::search_content_raw(&text, scope, glob)?
-                .matches
-                .into_iter()
-                .map(|m| m.path)
-                .collect()
-        }
-        QueryType::Regex(pattern) => search::search_regex_raw(&pattern, scope, glob)?
-            .matches
-            .into_iter()
-            .map(|m| m.path)
-            .collect(),
-        QueryType::Glob(pattern) => search::glob::search(&pattern, scope, None, 0)?
-            .files
-            .into_iter()
-            .map(|f| f.path)
-            .collect(),
-        QueryType::FilePath(path) => vec![path],
-    };
-    let mut files: Vec<String> = paths
-        .into_iter()
-        .map(|p| p.strip_prefix(scope).unwrap_or(&p).display().to_string())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files.join("\n"))
 }

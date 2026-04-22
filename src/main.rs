@@ -41,18 +41,6 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Run as MCP server (JSON-RPC on stdio).
-    #[arg(long)]
-    mcp: bool,
-
-    /// Enable edit mode: hashline output + tilth_edit tool.
-    #[arg(long)]
-    edit: bool,
-
-    /// Disable project fingerprint in MCP init.
-    #[arg(long)]
-    no_overview: bool,
-
     /// Expand top N search matches with inline source (default: 2 when flag present).
     #[arg(long, num_args = 0..=1, default_missing_value = "2", require_equals = true)]
     expand: Option<usize>,
@@ -62,7 +50,7 @@ struct Cli {
     glob: Option<String>,
 
     /// Find all callers of a symbol.
-    #[arg(long, conflicts_with_all = ["deps", "map", "edit", "files"])]
+    #[arg(long, conflicts_with_all = ["deps", "map"])]
     callers: bool,
 
     /// BFS depth for --callers. 1 = current behavior (default). Capped at 5.
@@ -84,21 +72,16 @@ struct Cli {
     skip_hubs: Option<String>,
 
     /// Analyze blast-radius dependencies of a file.
-    #[arg(long, conflicts_with_all = ["callers", "map", "edit", "files"])]
+    #[arg(long, conflicts_with_all = ["callers", "map"])]
     deps: bool,
 
     /// Generate a structural codebase map.
-    #[arg(long, conflicts_with_all = ["callers", "deps", "expand", "section", "full", "files"])]
+    #[arg(long, conflicts_with_all = ["callers", "deps", "expand", "section", "full"])]
     map: bool,
-
-    /// List only file paths containing matches (like rg -l).
-    #[arg(long, conflicts_with_all = ["map", "full", "expand", "section", "edit", "callers", "deps"])]
-    files: bool,
 
     /// Max results. Default: unlimited (or 50 for interactive TTY).
     /// Applies to: symbol/content/regex/callers search.
     /// NOTE: multi-symbol ("A,B,C") applies the limit per-query, not total.
-    /// NOTE: --files ignores this flag.
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
 
@@ -113,59 +96,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Install tilth into an MCP host's config.
-    /// Supported hosts: claude-code, cursor, windsurf, vscode, claude-desktop, opencode, gemini, codex, amp, droid, antigravity, zed, copilot-cli, augment, kiro, kilo-code, cline, roo-code, trae, qwen-code, crush, pi
-    Install {
-        /// MCP host to configure.
-        host: String,
-
-        /// Enable edit mode (hashline output + tilth_edit tool).
-        #[arg(long)]
-        edit: bool,
-    },
-    /// Show structural diff with function-level change summaries.
-    Diff {
-        /// Diff source: uncommitted (default), staged, or a git ref (e.g. HEAD~1, main..feat).
-        #[arg(default_value = "uncommitted")]
-        source: String,
-
-        /// Restrict diff to a specific file or directory.
-        #[arg(long)]
-        scope: Option<String>,
-
-        /// First file for file-to-file diff (requires --b).
-        #[arg(long)]
-        a: Option<PathBuf>,
-
-        /// Second file for file-to-file diff (requires --a).
-        #[arg(long)]
-        b: Option<PathBuf>,
-
-        /// Path to a .patch file to parse.
-        #[arg(long)]
-        patch: Option<PathBuf>,
-
-        /// Git log range for per-commit summaries (e.g. HEAD~5..HEAD).
-        #[arg(long)]
-        log: Option<String>,
-
-        /// Filter output to symbols or files matching this substring.
-        #[arg(long)]
-        search: Option<String>,
-
-        /// Show blast-radius warnings for signature-changed symbols.
-        #[arg(long)]
-        blast: bool,
-
-        /// Expand top N changed symbols with full source context.
-        #[arg(long, default_value_t = 0)]
-        expand: usize,
-
-        /// Max tokens in response.
-        #[arg(long, default_value_t = 10000)]
-        budget: u64,
-    },
-    /// Show the project fingerprint (what MCP init would inject).
+    /// Show the project fingerprint (languages, scale, structural overview).
     Overview,
 }
 
@@ -182,12 +113,6 @@ fn main() {
     // Subcommands
     if let Some(cmd) = cli.command {
         match cmd {
-            Command::Install { ref host, edit } => {
-                if let Err(e) = tilth::install::run(host, edit) {
-                    eprintln!("install error: {e}");
-                    process::exit(1);
-                }
-            }
             Command::Overview => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 let output = tilth::overview::fingerprint(&cwd);
@@ -197,72 +122,6 @@ fn main() {
                 }
                 println!("{output}");
             }
-            Command::Diff {
-                source,
-                scope,
-                a,
-                b,
-                patch,
-                log,
-                search,
-                blast,
-                expand,
-                budget,
-            } => {
-                let a_str = a.as_ref().map(|p| p.to_string_lossy().into_owned());
-                let b_str = b.as_ref().map(|p| p.to_string_lossy().into_owned());
-                let patch_str = patch.as_ref().map(|p| p.to_string_lossy().into_owned());
-                let diff_source = match tilth::diff::resolve_source(
-                    Some(&source),
-                    a_str.as_deref(),
-                    b_str.as_deref(),
-                    patch_str.as_deref(),
-                    log.as_deref(),
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("diff error: {e}");
-                        process::exit(1);
-                    }
-                };
-                let budget_opt = if budget == 0 { None } else { Some(budget) };
-                match tilth::diff::diff(
-                    &diff_source,
-                    scope.as_deref(),
-                    search.as_deref(),
-                    blast,
-                    expand,
-                    budget_opt,
-                ) {
-                    Ok(output) => emit_output(&output, io::stdout().is_terminal()),
-                    Err(e) => {
-                        eprintln!("diff error: {e}");
-                        process::exit(1);
-                    }
-                }
-            }
-        }
-        return;
-    }
-
-    // MCP mode: JSON-RPC server
-    if cli.mcp {
-        if cli.no_overview {
-            std::env::set_var("TILTH_NO_OVERVIEW", "1");
-        }
-        // Pass --scope to MCP if it's not the default "."
-        let mcp_scope = if cli.scope.as_os_str() == "." {
-            None
-        } else {
-            Some(
-                cli.scope
-                    .canonicalize()
-                    .unwrap_or_else(|_| cli.scope.clone()),
-            )
-        };
-        if let Err(e) = tilth::mcp::run(cli.edit, mcp_scope.as_deref()) {
-            eprintln!("mcp error: {e}");
-            process::exit(1);
         }
         return;
     }
@@ -332,13 +191,6 @@ fn main() {
             }
             return;
         }
-        emit_result(result, &query, cli.json, is_tty);
-        return;
-    }
-
-    // Files mode — list matching file paths only
-    if cli.files {
-        let result = tilth::run_files(&query, &scope, &cache, cli.glob.as_deref());
         emit_result(result, &query, cli.json, is_tty);
         return;
     }
