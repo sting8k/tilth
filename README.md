@@ -6,7 +6,7 @@ Upstream cuts cost-per-correct-answer by ~40% on benchmark runs. This fork keeps
 
 ## Features
 
-Inherits everything from upstream tilth (tree-sitter outlines, structural search, callers/diff), plus:
+Inherits everything from upstream tilth (tree-sitter outlines, structural search, callers), plus:
 
 - **Stable pagination** on every list result — `--limit` / `--offset` for glob, symbol, callers, callees, deps. No silent caps; soft warning at 100k matches.
 - **Directory token rollups** in `--map` so you see scale before you read.
@@ -228,22 +228,6 @@ src/lib.rs     (~210 tokens · pub mod budget; pub mod cache;)
 ```
 
 Every match includes a token estimate and a one-line preview. Pagination is stable across runs (deterministic sort).
-
-## Structural diff
-
-```bash
-$ tilth diff HEAD~1
-# Diff: HEAD~1 — 3 files, 2 modified, 1 added (~350 tokens)
-
-## src/auth.rs (3 symbols)
-  [~:sig]  fn handleAuth(req) → (req, ctx)    L42
-  [~]      fn validate_session                 L88
-  [+]      fn refresh_token                    L120
-```
-
-Function-level change detection. Use `--scope` to narrow, `--log` for history, conflict detection on by default.
-
-Inspired by [The Harness Problem](https://blog.can.ac/2026/02/12/the-harness-problem/).
 
 ## Speed
 

@@ -16,7 +16,6 @@
 pub(crate) mod budget;
 pub mod cache;
 pub(crate) mod classify;
-pub mod diff;
 pub mod error;
 pub(crate) mod format;
 pub mod index;
