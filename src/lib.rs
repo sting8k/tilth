@@ -28,7 +28,7 @@ pub(crate) mod search;
 pub(crate) mod session;
 pub(crate) mod types;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use cache::OutlineCache;
 use classify::classify;
@@ -476,47 +476,4 @@ fn multi_word_concept_search(
         path: scope.join(text),
         suggestion: read::suggest_similar_file(scope, first_word),
     })
-}
-
-/// List only matching file paths (no content). Output: newline-separated paths
-/// relative to scope, sorted, deduped.
-pub fn run_files(
-    query: &str,
-    scope: &Path,
-    _cache: &OutlineCache,
-    glob: Option<&str>,
-) -> Result<String, TilthError> {
-    let query_type = classify(query, scope);
-    let paths: Vec<PathBuf> = match query_type {
-        QueryType::Symbol(name) => search::search_symbol_raw(&name, scope, glob)?
-            .matches
-            .into_iter()
-            .map(|m| m.path)
-            .collect(),
-        QueryType::Content(text) | QueryType::Concept(text) | QueryType::Fallthrough(text) => {
-            search::search_content_raw(&text, scope, glob)?
-                .matches
-                .into_iter()
-                .map(|m| m.path)
-                .collect()
-        }
-        QueryType::Regex(pattern) => search::search_regex_raw(&pattern, scope, glob)?
-            .matches
-            .into_iter()
-            .map(|m| m.path)
-            .collect(),
-        QueryType::Glob(pattern) => search::glob::search(&pattern, scope, None, 0)?
-            .files
-            .into_iter()
-            .map(|f| f.path)
-            .collect(),
-        QueryType::FilePath(path) => vec![path],
-    };
-    let mut files: Vec<String> = paths
-        .into_iter()
-        .map(|p| p.strip_prefix(scope).unwrap_or(&p).display().to_string())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files.join("\n"))
 }

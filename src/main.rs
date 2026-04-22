@@ -50,7 +50,7 @@ struct Cli {
     glob: Option<String>,
 
     /// Find all callers of a symbol.
-    #[arg(long, conflicts_with_all = ["deps", "map", "files"])]
+    #[arg(long, conflicts_with_all = ["deps", "map"])]
     callers: bool,
 
     /// BFS depth for --callers. 1 = current behavior (default). Capped at 5.
@@ -72,21 +72,16 @@ struct Cli {
     skip_hubs: Option<String>,
 
     /// Analyze blast-radius dependencies of a file.
-    #[arg(long, conflicts_with_all = ["callers", "map", "files"])]
+    #[arg(long, conflicts_with_all = ["callers", "map"])]
     deps: bool,
 
     /// Generate a structural codebase map.
-    #[arg(long, conflicts_with_all = ["callers", "deps", "expand", "section", "full", "files"])]
+    #[arg(long, conflicts_with_all = ["callers", "deps", "expand", "section", "full"])]
     map: bool,
-
-    /// List only file paths containing matches (like rg -l).
-    #[arg(long, conflicts_with_all = ["map", "full", "expand", "section", "callers", "deps"])]
-    files: bool,
 
     /// Max results. Default: unlimited (or 50 for interactive TTY).
     /// Applies to: symbol/content/regex/callers search.
     /// NOTE: multi-symbol ("A,B,C") applies the limit per-query, not total.
-    /// NOTE: --files ignores this flag.
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
 
@@ -282,13 +277,6 @@ fn main() {
             }
             return;
         }
-        emit_result(result, &query, cli.json, is_tty);
-        return;
-    }
-
-    // Files mode — list matching file paths only
-    if cli.files {
-        let result = tilth::run_files(&query, &scope, &cache, cli.glob.as_deref());
         emit_result(result, &query, cli.json, is_tty);
         return;
     }
