@@ -33,7 +33,6 @@ pub fn read_file(
     section: Option<&str>,
     full: bool,
     cache: &OutlineCache,
-    edit_mode: bool,
 ) -> Result<String, TilthError> {
     let meta = match fs::metadata(path) {
         Ok(m) => m,
@@ -70,7 +69,7 @@ pub fn read_file(
 
     // Section param → return those lines verbatim, any size
     if let Some(range) = section {
-        return read_section(path, range, edit_mode);
+        return read_section(path, range);
     }
 
     // Binary detection
@@ -146,10 +145,6 @@ pub fn read_file(
     // Full mode or small file → return full content (skip smart view)
     if full || tokens <= TOKEN_THRESHOLD {
         let header = format::file_header(path, byte_len, line_count, ViewMode::Full);
-        if edit_mode {
-            let numbered = format::hashlines(&content, 1);
-            return Ok(format!("{header}\n\n{numbered}"));
-        }
         let numbered = format::number_lines(&content, 1);
         return Ok(format!("{header}\n\n{numbered}"));
     }
@@ -327,7 +322,7 @@ fn suggest_headings(buf: &[u8], query: &str, top_n: usize) -> Vec<String> {
 /// Read a specific line range from a file.
 /// Uses memchr to find the Nth newline offset and slice the mmap buffer directly
 /// instead of collecting all lines into a Vec.
-fn read_section(path: &Path, range: &str, edit_mode: bool) -> Result<String, TilthError> {
+fn read_section(path: &Path, range: &str) -> Result<String, TilthError> {
     let file = fs::File::open(path).map_err(|e| TilthError::IoError {
         path: path.to_path_buf(),
         source: e,
@@ -399,11 +394,7 @@ fn read_section(path: &Path, range: &str, edit_mode: bool) -> Result<String, Til
     let byte_len = selected.len() as u64;
     let line_count = (e - s) as u32;
     let header = format::file_header(path, byte_len, line_count, ViewMode::Section);
-    let formatted = if edit_mode {
-        format::hashlines(&selected, start as u32)
-    } else {
-        format::number_lines(&selected, start as u32)
-    };
+    let formatted = format::number_lines(&selected, start as u32);
     Ok(format!("{header}\n\n{formatted}"))
 }
 
@@ -632,7 +623,7 @@ mod tests {
         std::env::set_var("TILTH_FULL_SIZE_CAP", "100");
 
         let cache = OutlineCache::new();
-        let result = read_file(&path, None, true, &cache, false).unwrap();
+        let result = read_file(&path, None, true, &cache).unwrap();
 
         // Should contain the progressive-read warning, not the full file content
         assert!(

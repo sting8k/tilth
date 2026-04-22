@@ -68,34 +68,6 @@ pub fn number_lines(content: &str, start: u32) -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Hashline support (edit mode)
-// ---------------------------------------------------------------------------
-
-/// FNV-1a hash of a line, truncated to 12 bits (3 hex chars).
-/// Used as a per-line content checksum for edit-mode anchors.
-pub(crate) fn line_hash(bytes: &[u8]) -> u16 {
-    let mut h: u32 = 0x811c_9dc5;
-    for &b in bytes {
-        h ^= u32::from(b);
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    (h & 0xFFF) as u16
-}
-
-/// Format lines with hashline anchors: `{line}:{hash}|{content}`
-/// Used in edit mode so the agent can reference lines by content hash.
-pub fn hashlines(content: &str, start: u32) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut out = String::with_capacity(content.len() + lines.len() * 8);
-    for (i, line) in lines.iter().enumerate() {
-        let num = start as usize + i;
-        let hash = line_hash(line.as_bytes());
-        let _ = writeln!(out, "{num}:{hash:03x}|{line}");
-    }
-    out
-}
-
 /// Path relative to scope for cleaner output. Falls back to full path.
 pub(crate) fn rel(path: &Path, scope: &Path) -> String {
     path.strip_prefix(scope)
