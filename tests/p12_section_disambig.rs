@@ -95,3 +95,69 @@ fn bare_filename_with_section_ambiguous_prod_fails_loud() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bare_filename_respects_gitignore_for_disambig() {
+    // Repo with a bespoke "benchmark/" dir NOT in NON_PROD_DIR_SEGMENTS.
+    // Only .gitignore marks it as non-primary.
+    let dir = std::env::temp_dir().join(format!(
+        "tilth_p12fix_gi_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("benchmark/nested")).unwrap();
+    fs::write(dir.join(".gitignore"), "benchmark/\n").unwrap();
+    fs::write(dir.join("src/lib.rs"), "// main\n").unwrap();
+    fs::write(dir.join("benchmark/nested/lib.rs"), "// bench copy\n").unwrap();
+
+    let cache = tilth::cache::OutlineCache::new();
+    let out = tilth::run("lib.rs", &dir, Some("1-1"), None, None, 0, None, &cache).unwrap();
+
+    assert!(
+        out.contains("Resolved 'lib.rs'") && out.contains("src/lib.rs"),
+        "gitignore-marked benchmark should be non-primary, got: {out}"
+    );
+    assert!(
+        out.contains("non-primary"),
+        "wording should say 'non-primary', got: {out}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bare_filename_depth_rank_picks_shallowest() {
+    // Two primary candidates (no .gitignore filter). Depth-rank tiebreaker
+    // should pick the shallowest.
+    let dir = std::env::temp_dir().join(format!(
+        "tilth_p12fix_depth_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("pkg/deep/nested")).unwrap();
+    fs::write(dir.join("src/main.rs"), "// shallow\n").unwrap();
+    fs::write(dir.join("pkg/deep/nested/main.rs"), "// deep\n").unwrap();
+
+    let cache = tilth::cache::OutlineCache::new();
+    let out = tilth::run("main.rs", &dir, Some("1-1"), None, None, 0, None, &cache).unwrap();
+
+    assert!(
+        out.contains("Resolved 'main.rs'"),
+        "expected resolution via depth-rank, got: {out}"
+    );
+    let picked_line = out.lines().find(|l| l.contains("Resolved")).unwrap_or("");
+    assert!(
+        picked_line.contains("→ src/main.rs"),
+        "expected shallowest path picked, got: {picked_line}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

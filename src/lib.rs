@@ -213,6 +213,41 @@ fn is_non_prod(path: &Path, scope: &Path) -> bool {
     })
 }
 
+/// Build a set of files visible to a .gitignore-respecting walk of `scope`.
+/// Anything NOT in this set (e.g. build artifacts, benchmark fixtures, caches,
+/// egg-info, venvs) is treated as non-primary — this lets us avoid hardcoding
+/// every repo's ignore patterns and naturally adapts to whatever conventions
+/// a project uses (`.gitignore` + `.ignore` + `.git/info/exclude`).
+fn build_visible_set(scope: &Path) -> std::collections::HashSet<std::path::PathBuf> {
+    let walker = ignore::WalkBuilder::new(scope)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .parents(true)
+        .follow_links(false)
+        .build();
+    let mut out = std::collections::HashSet::new();
+    for entry in walker.flatten() {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
+            out.insert(entry.path().to_path_buf());
+        }
+    }
+    out
+}
+
+/// Rank by path-depth from scope (shallower = more primary). Used as a
+/// tiebreaker when gitignore + hardcoded filters still leave >1 candidate:
+/// an `index.ts` or `Program.cs` at the workspace root is almost always the
+/// one the agent wants, vs. nested test harness copies.
+fn depth_from_scope(path: &Path, scope: &Path) -> usize {
+    path.strip_prefix(scope)
+        .unwrap_or(path)
+        .components()
+        .count()
+}
+
 /// Resolve a glob pattern produced from a bare filename to a single file when
 /// `--section` is supplied. Returns:
 /// - `Some((picked, Some(note)))` when exactly one prod-path candidate exists
@@ -237,26 +272,76 @@ fn disambiguate_glob_for_section(
         return Ok(Some((result.files[0].path.clone(), None)));
     }
 
-    let prod: Vec<&std::path::PathBuf> = result
+    // .gitignore-aware "primary" set — a file is primary iff it is visible
+    // to a standard gitignore-respecting walk AND not inside one of the
+    // hardcoded test/vendor segments (which stay around even in repos
+    // without a .gitignore).
+    let visible = build_visible_set(scope);
+    let primary: Vec<&std::path::PathBuf> = result
         .files
         .iter()
         .map(|e| &e.path)
-        .filter(|p| !is_non_prod(p, scope))
+        .filter(|p| visible.contains(*p) && !is_non_prod(p, scope))
         .collect();
 
-    if prod.len() == 1 {
-        let picked = prod[0].clone();
-        let skipped = total - 1;
+    // Picker: single primary → done. Multiple primary → break tie by
+    // min depth-from-scope if unique, otherwise fail loud.
+    let picked_opt: Option<std::path::PathBuf> = if primary.len() == 1 {
+        Some(primary[0].clone())
+    } else if primary.len() > 1 {
+        let min_depth = primary
+            .iter()
+            .map(|p| depth_from_scope(p, scope))
+            .min()
+            .unwrap_or(0);
+        let shallowest: Vec<&std::path::PathBuf> = primary
+            .iter()
+            .copied()
+            .filter(|p| depth_from_scope(p, scope) == min_depth)
+            .collect();
+        if shallowest.len() == 1 {
+            Some(shallowest[0].clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(picked) = picked_opt {
+        let skipped_count = total - 1;
+        // Preview up to 3 of the skipped non-primary paths so the agent
+        // knows what got filtered (helps when the pick is wrong).
+        let skipped_preview: Vec<String> = result
+            .files
+            .iter()
+            .map(|e| &e.path)
+            .filter(|p| **p != picked)
+            .take(3)
+            .map(|p| p.strip_prefix(scope).unwrap_or(p).display().to_string())
+            .collect();
+        let skipped_str = if skipped_preview.is_empty() {
+            String::new()
+        } else {
+            let joined = skipped_preview.join(", ");
+            let more = if skipped_count > skipped_preview.len() {
+                format!(", +{} more", skipped_count - skipped_preview.len())
+            } else {
+                String::new()
+            };
+            format!(" [{joined}{more}]")
+        };
         let note = format!(
-            "Resolved '{original_query}' → {} (skipped {skipped} test/override/vendor copies). Pass full path to override.",
-            picked.strip_prefix(scope).unwrap_or(&picked).display()
+            "Resolved '{original_query}' → {} (skipped {skipped_count} non-primary {}{skipped_str}). Pass full path to override.",
+            picked.strip_prefix(scope).unwrap_or(&picked).display(),
+            if skipped_count == 1 { "copy" } else { "copies" },
         );
         return Ok(Some((picked, Some(note))));
     }
 
-    // Ambiguous — fail loud with top-5 candidates.
-    let candidates: Vec<&std::path::PathBuf> = if prod.len() > 1 {
-        prod
+    // Ambiguous — fail loud with top-5 candidates (prefer primary set).
+    let candidates: Vec<&std::path::PathBuf> = if !primary.is_empty() {
+        primary
     } else {
         result.files.iter().take(5).map(|e| &e.path).collect()
     };
