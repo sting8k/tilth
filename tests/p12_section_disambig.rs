@@ -161,3 +161,38 @@ fn bare_filename_depth_rank_picks_shallowest() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn no_match_concept_query_offers_symbol_suggestion() {
+    // P1.3.fix-edge — concept/fallthrough miss should suggest cross-convention
+    // symbol via search::symbol::suggest, not just file-name lookup.
+    let dir = std::env::temp_dir().join(format!(
+        "tilth_nomatch_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("api.go"),
+        "package main\nfunc ProcessRequest() {}\n",
+    )
+    .unwrap();
+
+    let cache = tilth::cache::OutlineCache::new();
+    // bare lowercase token → Concept path → no symbol/content hit → must
+    // surface the cross-convention suggestion.
+    let err = tilth::run("processrequst", &dir, None, None, None, 0, None, &cache)
+        .expect_err("expected NoMatches");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no matches for \"processrequst\""),
+        "expected NoMatches wording, got: {msg}"
+    );
+    assert!(
+        msg.contains("Did you mean: ProcessRequest"),
+        "expected symbol suggestion, got: {msg}"
+    );
+}

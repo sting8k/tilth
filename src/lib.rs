@@ -620,9 +620,10 @@ fn single_query_search(
         return search::format_raw_result(&sym_result, cache);
     }
 
-    Err(error::TilthError::NotFound {
-        path: scope.join(text),
-        suggestion: read::suggest_similar_file(scope, text),
+    Err(error::TilthError::NoMatches {
+        query: text.to_string(),
+        scope: scope.to_path_buf(),
+        suggestion: symbol_or_file_suggestion(scope, text, glob),
     })
 }
 
@@ -670,8 +671,20 @@ fn multi_word_concept_search(
     }
 
     let first_word = words.first().copied().unwrap_or(text);
-    Err(error::TilthError::NotFound {
-        path: scope.join(text),
-        suggestion: read::suggest_similar_file(scope, first_word),
+    Err(error::TilthError::NoMatches {
+        query: text.to_string(),
+        scope: scope.to_path_buf(),
+        suggestion: symbol_or_file_suggestion(scope, first_word, glob),
     })
+}
+
+/// Cross-convention symbol suggest first (P1.3 infra), then file-name fallback.
+/// Used by symbol→content miss paths so users get a useful "Did you mean: ...".
+fn symbol_or_file_suggestion(scope: &Path, query: &str, glob: Option<&str>) -> Option<String> {
+    let hits = search::symbol::suggest(query, scope, glob, 1);
+    if let Some((name, path, line)) = hits.into_iter().next() {
+        let rel = path.strip_prefix(scope).unwrap_or(&path).display();
+        return Some(format!("{name} ({rel}:{line})"));
+    }
+    read::suggest_similar_file(scope, query)
 }

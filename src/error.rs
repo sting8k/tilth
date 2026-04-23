@@ -7,6 +7,11 @@ pub enum TilthError {
         path: PathBuf,
         suggestion: Option<String>,
     },
+    NoMatches {
+        query: String,
+        scope: PathBuf,
+        suggestion: Option<String>,
+    },
     PermissionDenied {
         path: PathBuf,
     },
@@ -34,6 +39,13 @@ impl std::fmt::Display for TilthError {
                 }
                 Ok(())
             }
+            Self::NoMatches { query, scope, suggestion } => {
+                write!(f, "no matches for \"{query}\" in {}", scope.display())?;
+                if let Some(s) = suggestion {
+                    write!(f, "\n> Did you mean: {s}")?;
+                }
+                Ok(())
+            }
             Self::PermissionDenied { path } => {
                 write!(f, "{} [permission denied]", path.display())
             }
@@ -57,7 +69,7 @@ impl TilthError {
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::NotFound { .. } | Self::IoError { .. } => 2,
+            Self::NotFound { .. } | Self::NoMatches { .. } | Self::IoError { .. } => 2,
             Self::InvalidQuery { .. } | Self::ParseError { .. } => 3,
             Self::PermissionDenied { .. } => 4,
         }
