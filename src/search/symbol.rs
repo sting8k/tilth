@@ -823,6 +823,25 @@ fn is_definition_line(line: &str) -> bool {
 ///
 /// Cheap because it only fires on the 0-hit path. Uses ripgrep's `\b…\b`
 /// matcher with `(?i)` flag — same engine as `find_usages`.
+/// Normalize an identifier for fuzzy comparison: lowercase + strip underscores.
+/// Lets `searchSymbol` ↔ `search_symbol` ↔ `SearchSymbol` all collapse to
+/// the same canonical string, so a single edit_distance over normalized
+/// forms covers both naming-convention mismatches and typos uniformly.
+fn normalize_ident(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b == b'_' {
+            continue;
+        }
+        out.push(b.to_ascii_lowercase() as char);
+    }
+    out
+}
+
+/// Sweep `scope` for identifiers whose normalized form is close to the
+/// normalized `query` (edit distance ≤ threshold). Only considers source
+/// files (JSON / markdown / lockfiles excluded) to avoid noise from i18n
+/// bundles, build manifests, etc.
 pub fn suggest(
     query: &str,
     scope: &Path,
@@ -832,22 +851,26 @@ pub fn suggest(
     if query.is_empty() {
         return Vec::new();
     }
-    let pat = format!(r"(?i)\b{}\b", regex_syntax::escape(query));
-    let Ok(matcher) = RegexMatcher::new(&pat) else {
+    let q_norm = normalize_ident(query);
+    if q_norm.is_empty() {
         return Vec::new();
-    };
+    }
+    // Threshold scales with query length: allow 1 edit for short queries,
+    // up to 2 for ≥6 normalized chars. Keeps recall for typos without
+    // matching unrelated identifiers.
+    let max_dist: usize = if q_norm.len() >= 6 { 2 } else { 1 };
+
     let Ok(walker) = super::walker(scope, glob) else {
         return Vec::new();
     };
 
-    // (spelling -> (path, line))
+    // spelling → (path, line)
     let hits: Mutex<std::collections::HashMap<String, (std::path::PathBuf, u32)>> =
         Mutex::new(std::collections::HashMap::new());
 
     walker.run(|| {
         let hits = &hits;
-        let matcher = matcher.clone();
-        let q_len = query.len();
+        let q_norm = q_norm.clone();
         Box::new(move |entry| {
             let Ok(entry) = entry else {
                 return ignore::WalkState::Continue;
@@ -856,48 +879,66 @@ pub fn suggest(
                 return ignore::WalkState::Continue;
             }
             let path = entry.path();
+            // Only sweep real source files — drops i18n JSON, SOURCES.txt,
+            // lockfiles, markdown, etc. that would otherwise pollute
+            // suggestions with non-identifier text.
+            if !matches!(
+                crate::lang::detect_file_type(path),
+                crate::types::FileType::Code(_)
+            ) {
+                return ignore::WalkState::Continue;
+            }
             if let Ok(meta) = std::fs::metadata(path) {
                 if meta.len() > 500_000 {
                     return ignore::WalkState::Continue;
                 }
             }
+            let Ok(content) = std::fs::read_to_string(path) else {
+                return ignore::WalkState::Continue;
+            };
             let mut local: Vec<(String, u32)> = Vec::new();
-            let mut searcher = Searcher::new();
-            let _ = searcher.search_path(
-                &matcher,
-                path,
-                UTF8(|line_num, line| {
-                    // Extract the actual matched word(s) — re-scan line for
-                    // word-boundary substrings of length close to q_len.
-                    for (start, ch) in line.char_indices() {
-                        if !ch.is_ascii_alphanumeric() && ch != '_' {
-                            continue;
-                        }
-                        // Word start
-                        if start > 0 {
-                            let prev = line.as_bytes()[start - 1];
-                            if prev.is_ascii_alphanumeric() || prev == b'_' {
-                                continue;
-                            }
-                        }
-                        let rest = &line[start..];
-                        let end = rest
-                            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                            .unwrap_or(rest.len());
-                        let word = &rest[..end];
-                        // Filter: roughly same length (±50%) and case-insensitive equal first letter
-                        if word.len() < q_len.saturating_sub(2)
-                            || word.len() > q_len + 4
-                        {
-                            continue;
-                        }
-                        if word.eq_ignore_ascii_case(query) {
-                            local.push((word.to_string(), line_num as u32));
-                        }
+            let mut seen_on_path: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for (line_idx, line) in content.lines().enumerate() {
+                let bytes = line.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if !(b.is_ascii_alphabetic() || b == b'_') {
+                        i += 1;
+                        continue;
                     }
-                    Ok(true)
-                }),
-            );
+                    let start = i;
+                    while i < bytes.len()
+                        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    let word = &line[start..i];
+                    // Cheap length prefilter — keeps the inner Levenshtein
+                    // call off >90% of tokens.
+                    let w_norm_len = word.bytes().filter(|&c| c != b'_').count();
+                    if w_norm_len == 0
+                        || w_norm_len + max_dist < q_norm.len()
+                        || w_norm_len > q_norm.len() + max_dist
+                    {
+                        continue;
+                    }
+                    if seen_on_path.contains(word) {
+                        continue;
+                    }
+                    let w_norm = normalize_ident(word);
+                    if w_norm == q_norm && word == query {
+                        // exact match — ignore (caller already handles hit path)
+                        continue;
+                    }
+                    let d = crate::read::edit_distance(&q_norm, &w_norm);
+                    if d <= max_dist {
+                        seen_on_path.insert(word.to_string());
+                        local.push((word.to_string(), line_idx as u32 + 1));
+                    }
+                }
+            }
             if !local.is_empty() {
                 let mut h = hits.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 for (spelling, line) in local {
@@ -909,17 +950,20 @@ pub fn suggest(
         })
     });
 
-    let q_lower = query.to_ascii_lowercase();
     let mut all: Vec<(String, std::path::PathBuf, u32)> = hits
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .into_iter()
-        .filter(|(s, _)| s != query) // exclude exact-spelling (would have hit)
+        .filter(|(s, _)| s != query)
         .map(|(s, (p, l))| (s, p, l))
         .collect();
+    // Rank by distance on normalized form; prefer same-case exact normalized
+    // match over mere typo; then alphabetical for stability.
     all.sort_by(|a, b| {
-        let da = crate::read::edit_distance(&q_lower, &a.0.to_ascii_lowercase());
-        let db = crate::read::edit_distance(&q_lower, &b.0.to_ascii_lowercase());
+        let an = normalize_ident(&a.0);
+        let bn = normalize_ident(&b.0);
+        let da = crate::read::edit_distance(&q_norm, &an);
+        let db = crate::read::edit_distance(&q_norm, &bn);
         da.cmp(&db).then_with(|| a.0.cmp(&b.0))
     });
     all.truncate(top_n);
@@ -1178,6 +1222,77 @@ end
 
         let no_match = suggest("CompletelyUnrelatedXyz", &dir, None, 3);
         assert!(no_match.is_empty(), "no fuzzy hit expected, got: {no_match:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_crosses_naming_convention() {
+        let dir = std::env::temp_dir().join(format!("tilth_p13fix_conv_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("foo.rs");
+        std::fs::write(
+            &path,
+            "pub fn search_symbol() -> bool { true }\npub fn HotReloadProcessor() {}\n",
+        )
+        .unwrap();
+
+        // camelCase query → snake_case symbol
+        let hits = suggest("searchSymbol", &dir, None, 3);
+        assert!(
+            hits.iter().any(|(s, _, _)| s == "search_symbol"),
+            "expected snake_case suggestion for camelCase query, got: {hits:?}"
+        );
+
+        // lowercase query → PascalCase symbol
+        let hits2 = suggest("hotreloadprocessor", &dir, None, 3);
+        assert!(
+            hits2.iter().any(|(s, _, _)| s == "HotReloadProcessor"),
+            "expected PascalCase suggestion for lowercase query, got: {hits2:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_handles_lev1_typo() {
+        let dir = std::env::temp_dir().join(format!("tilth_p13fix_typo_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("foo.rs");
+        std::fs::write(&path, "pub fn run_inner() {}\n").unwrap();
+
+        let hits = suggest("run_iner", &dir, None, 3);
+        assert!(
+            hits.iter().any(|(s, _, _)| s == "run_inner"),
+            "expected typo-tolerant suggestion, got: {hits:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggest_skips_non_source_files() {
+        let dir = std::env::temp_dir().join(format!("tilth_p13fix_skip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // JSON i18n bundle — must NOT match
+        std::fs::write(dir.join("es.json"), r#"{"sesion": "iniciar"}"#).unwrap();
+        // SOURCES.txt build artifact — must NOT match
+        std::fs::write(dir.join("SOURCES.txt"), "src/foo/sesion.py\n").unwrap();
+        // Real source — should match
+        std::fs::write(dir.join("real.py"), "def session(): pass\n").unwrap();
+
+        let hits = suggest("Sesion", &dir, None, 5);
+        assert!(
+            hits.iter().all(|(_, p, _)| {
+                let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                n != "es.json" && n != "SOURCES.txt"
+            }),
+            "expected non-source files filtered out, got: {hits:?}"
+        );
+        assert!(
+            hits.iter().any(|(s, _, _)| s == "session"),
+            "expected real .py hit, got: {hits:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
